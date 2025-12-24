@@ -1,0 +1,35 @@
+# Rust
+target/
+Cargo.lock
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+.env.local
+venv/
+
+# Development
+workspaces/
+cache/
+*.log
+
+# Secrets (keep structure but ignore content)
+secrets/*
+!secrets/.gitkeep
+
+# Config
+config.yaml
+
+# Dump folder (test/example files)
+dump/
+

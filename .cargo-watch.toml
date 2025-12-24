@@ -1,0 +1,10 @@
+[watch]
+ignore = [
+    "workspaces/**",
+    "cache/**",
+    "target/**",
+    "secrets/**",
+    "dump/**",
+    ".git/**",
+]
+

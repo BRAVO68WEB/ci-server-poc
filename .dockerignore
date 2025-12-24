@@ -1,0 +1,10 @@
+target/
+.git/
+.gitignore
+*.md
+workspaces/
+cache/
+*.log
+.env
+.DS_Store
+

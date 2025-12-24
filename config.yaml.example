@@ -1,0 +1,88 @@
+# CI Runner Configuration File
+# This is a dummy/example configuration for local development
+
+server:
+  host: "0.0.0.0"
+  port: 8080
+  metrics_port: 9090
+
+git_server:
+  base_url: ""
+  service_token_path: ""
+  api_timeout: 30  # seconds
+
+queue:
+  host: ""  # Use service name in docker-compose
+  port: ""
+  virtual_host: "/ci"
+  queue_name: "ci.jobs"
+  dead_letter_queue: "ci.jobs.dlq"
+  prefetch_count: 1
+  username_file: ""
+  password_file: ""
+  connection_timeout: 30  # seconds
+  heartbeat: 60  # seconds
+  tls:
+    enabled: false
+    ca_cert_path: ""
+    client_cert_path: ""
+    client_key_path: ""
+
+executor:
+  max_concurrent_jobs: 10
+  workspace_root: "/app/workspaces"
+  cache_root: "/app/cache"
+  
+  docker:
+    socket: "unix:///var/run/docker.sock"
+    registry_auth: ""
+    network: "ci-network"
+    network_mode: "bridge"
+  
+  resources:
+    cpu_limit: 2.0
+    memory_limit: "4GB"
+    storage_limit: "10GB"
+    pids_limit: 1024
+  
+  timeouts:
+    default: 3600  # 1 hour in seconds
+    max: 21600  # 6 hours in seconds
+    git_clone: 600  # 10 minutes in seconds
+
+log_streamer:
+  git_server:
+    base_url: ""
+    endpoint: "/api/v1/ci/jobs/{job_id}/logs"
+    auth_token_env: "GS_SERVICE_TOKEN"
+    timeout: 10  # seconds
+  
+  buffer:
+    size: 4096
+    flush_interval: 1  # seconds
+    max_retries: 3
+  
+  rate_limit:
+    max_bytes_per_second: "1MB"
+    burst_size: "5MB"
+
+security:
+  secret_backend: "file"  # vault | file | env
+  vault_addr: ""
+  vault_token_path: ""
+  seccomp_profile: ""
+  apparmor_profile: ""
+  network:
+    isolation: "per_job"
+    block_metadata: true
+
+logging:
+  level: "info"
+  format: "json"
+  output: "stdout"
+
+metrics:
+  enabled: true
+  port: 9090
+  path: "/metrics"
+

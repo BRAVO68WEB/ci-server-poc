@@ -1,0 +1,69 @@
+services:
+  rabbitmq:
+    image: rabbitmq:4.2-management-alpine
+    container_name: ci-rabbitmq
+    hostname: rabbitmq
+    ports:
+      - "5672:5672"
+      - "15672:15672"  # Management UI
+    environment:
+      RABBITMQ_DEFAULT_USER: ci_user
+      RABBITMQ_DEFAULT_PASS: ci_pass
+      RABBITMQ_DEFAULT_VHOST: /ci
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    networks:
+      - ci-network
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  ci-runner-dev:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    container_name: ci-runner-dev
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    volumes:
+      # Mount source code for hot-reloading
+      - ./crates:/app/crates:ro
+      - ./Cargo.toml:/app/Cargo.toml:ro
+      - ./Cargo.lock:/app/Cargo.lock:ro
+      # Mount config and secrets
+      - ./config.yaml:/app/config.yaml:ro
+      - ./secrets:/app/secrets:ro
+      # Mount Docker socket for container execution
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      # Mount workspaces and cache directories
+      # Use Docker volume for workspaces to allow mounting into job containers (Docker Desktop Mac requirement)
+      - ci-workspaces:/app/workspaces
+      - ./cache:/app/cache
+      # Mount target directory for faster builds (optional)
+      - ci_runner_target:/app/target
+    environment:
+      - RUST_LOG=info
+      - CI_CONFIG=/app/config.yaml
+      - GS_SERVICE_TOKEN=${GS_SERVICE_TOKEN:-dummy_token}
+      - CARGO_TARGET_DIR=/app/target
+    ports:
+      - "8080:8080"
+      - "9090:9090"
+    networks:
+      - ci-network
+    command: cargo watch --ignore "workspaces/**" --ignore "cache/**" --ignore "target/**" -x "run --bin ci_runner"
+    restart: unless-stopped
+
+volumes:
+  rabbitmq_data:
+  ci_runner_target:
+  ci-workspaces:
+
+networks:
+  ci-network:
+    driver: bridge
+    name: ci-network
+

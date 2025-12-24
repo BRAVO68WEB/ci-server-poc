@@ -1,0 +1,65 @@
+FROM rust:1.92 AS base
+
+# The full rust image already has git and most tools, we just need to ensure cargo-watch
+# If git is missing, install it (but it should already be there)
+RUN if ! command -v git &> /dev/null; then \
+        apt-get update && \
+        apt-get install -y --no-install-recommends git && \
+        rm -rf /var/lib/apt/lists/*; \
+    fi
+
+# Install cargo-watch for hot-reloading
+RUN cargo install cargo-watch
+
+# Set working directory
+WORKDIR /app
+
+# Copy workspace files
+COPY Cargo.toml Cargo.lock ./
+
+# Copy crate manifests
+COPY crates/ci_runner/Cargo.toml ./crates/ci_runner/
+COPY crates/api/Cargo.toml ./crates/api/
+COPY crates/task_manager/Cargo.toml ./crates/task_manager/
+
+# Create dummy source files to cache dependencies
+RUN mkdir -p crates/ci_runner/src crates/api/src crates/task_manager/src && \
+    echo "fn main() {}" > crates/ci_runner/src/main.rs && \
+    echo "fn main() {}" > crates/api/src/main.rs && \
+    echo "fn main() {}" > crates/task_manager/src/main.rs
+
+# Build dependencies (this layer will be cached)
+RUN cargo build --bin ci_runner || true
+
+# Remove dummy source files
+RUN rm -rf crates/*/src
+
+# Copy actual source code (this will be mounted as volume in docker-compose)
+# But we keep this for the initial build
+COPY crates ./crates
+
+# Build the application
+RUN cargo build --bin ci_runner
+
+# Development stage
+FROM rust:1.92 AS dev
+
+# The full rust image already has git and most tools, we just need to ensure cargo-watch
+# If git is missing, install it (but it should already be there)
+RUN if ! command -v git &> /dev/null; then \
+        apt-get update && \
+        apt-get install -y --no-install-recommends git && \
+        rm -rf /var/lib/apt/lists/*; \
+    fi
+
+# Install cargo-watch
+RUN cargo install cargo-watch
+
+WORKDIR /app
+
+# Copy built binary from base stage (optional, cargo watch will rebuild)
+# COPY --from=base /app/target/debug/ci_runner /app/target/debug/ci_runner
+
+# Default command (can be overridden in docker-compose)
+CMD ["cargo", "watch", "-x", "run --bin ci_runner"]
+
