@@ -1,10 +1,10 @@
 //! Application initialization and setup
 
-use ci_runner::config::Config;
-use ci_runner::error::ExecutionError;
-use ci_runner::executor::ExecutorConfig;
-use ci_runner::scheduler::JobScheduler;
-use ci_runner::workspace::WorkspaceManager;
+use crate::config::Config;
+use crate::models::error::ExecutionError;
+use crate::services::executor::ExecutorConfig;
+use crate::services::scheduler::JobScheduler;
+use crate::utils::workspace::WorkspaceManager;
 use std::sync::Arc;
 
 /// Application components

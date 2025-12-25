@@ -1,11 +1,12 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Duration;
 use uuid::Uuid;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct JobEvent {
     pub job_id: Uuid,
     pub run_id: Uuid,
@@ -17,7 +18,7 @@ pub struct JobEvent {
     pub timeout: Option<Duration>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct RepositoryInfo {
     pub owner: String,
     pub name: String,
@@ -27,20 +28,20 @@ pub struct RepositoryInfo {
     pub ref_type: RefType,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub enum RefType {
     Branch,
     Tag,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct TriggerInfo {
     pub event_type: EventType,
     pub actor: String,
     pub metadata: HashMap<String, String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub enum EventType {
     Push,
     Tag,
@@ -48,7 +49,7 @@ pub enum EventType {
     Manual,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, ToSchema)]
 pub enum JobPriority {
     Low = 0,
     Normal = 1,
@@ -56,7 +57,7 @@ pub enum JobPriority {
     Critical = 3,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct RunnerConfig {
     pub image: DockerImage,
     pub on: TriggerConditions,
@@ -67,7 +68,7 @@ pub struct RunnerConfig {
     pub timeout: Option<Duration>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct DockerImage {
     pub name: String,
     pub tag: String,
@@ -77,8 +78,7 @@ pub struct DockerImage {
     pub pull_policy: PullPolicy,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, ToSchema)]
 pub enum PullPolicy {
     Always,
     #[default]
@@ -87,7 +87,7 @@ pub enum PullPolicy {
 }
 
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct TriggerConditions {
     #[serde(default)]
     pub push: Vec<String>,
@@ -95,7 +95,7 @@ pub struct TriggerConditions {
     pub tag: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct Step {
     #[serde(rename = "type")]
     pub step_type: StepType,
@@ -109,12 +109,46 @@ pub struct Step {
     #[serde(default)]
     pub continue_on_error: bool,
     #[serde(default)]
+    #[schema(value_type = Option<String>)]
     pub working_directory: Option<PathBuf>,
     #[serde(default)]
     pub shell: Shell,
+    #[serde(default)]
+    pub if_condition: Option<String>,
+    #[serde(default)]
+    pub when: Option<WhenCondition>,
+    #[serde(default)]
+    pub retry: Option<RetryPolicy>,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub enum WhenCondition {
+    #[serde(rename = "on_success")]
+    OnSuccess,
+    #[serde(rename = "on_failure")]
+    OnFailure,
+    #[serde(rename = "always")]
+    Always,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct RetryPolicy {
+    pub max_attempts: u32,
+    #[serde(default = "default_backoff_multiplier")]
+    pub backoff_multiplier: f64,
+    #[serde(default = "default_initial_delay_secs")]
+    pub initial_delay_secs: u64,
+}
+
+fn default_backoff_multiplier() -> f64 {
+    2.0
+}
+
+fn default_initial_delay_secs() -> u64 {
+    1
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, ToSchema)]
 pub enum StepType {
     #[serde(rename = "pre")]
     Pre,
@@ -124,8 +158,7 @@ pub enum StepType {
     Post,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, ToSchema)]
 pub enum Shell {
     #[serde(rename = "bash")]
     #[default]
@@ -153,7 +186,7 @@ pub struct JobCompletionEvent {
     pub metadata: HashMap<String, String>,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, ToSchema)]
 pub enum JobStatus {
     Success,
     Failed,
@@ -174,7 +207,7 @@ impl JobStatus {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct StepSummary {
     pub name: String,
     pub status: JobStatus,
@@ -182,7 +215,7 @@ pub struct StepSummary {
     pub duration: Duration,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct ArtifactInfo {
     pub name: String,
     pub path: String,
@@ -190,7 +223,7 @@ pub struct ArtifactInfo {
     pub checksum: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct LogEntry {
     pub job_id: Uuid,
     pub run_id: Uuid,
@@ -201,7 +234,7 @@ pub struct LogEntry {
     pub sequence: u64,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, ToSchema)]
 pub enum LogLevel {
     Debug,
     Info,
@@ -219,7 +252,7 @@ pub struct JobContext {
     pub trigger: TriggerInfo,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct StepResult {
     pub name: String,
     pub step_type: StepType,
@@ -230,7 +263,7 @@ pub struct StepResult {
     pub stderr: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct JobResult {
     pub status: JobStatus,
     pub steps: Vec<StepResult>,

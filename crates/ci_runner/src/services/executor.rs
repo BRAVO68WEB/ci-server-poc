@@ -1,5 +1,5 @@
-use crate::error::{DockerError, ExecutionError};
-use crate::types::{JobContext, JobResult, JobStatus, Step, StepResult, StepType};
+use crate::models::error::{DockerError, ExecutionError};
+use crate::models::types::{JobContext, JobResult, JobStatus, Step, StepResult, StepType};
 use bollard::Docker;
 use bollard::exec::{CreateExecOptions, StartExecOptions};
 use bollard::models::{ContainerCreateBody, HostConfig};
@@ -18,7 +18,7 @@ pub struct JobExecutor {
 }
 
 pub trait LogStreamerTrait: Send + Sync {
-    fn send(&self, job_id: uuid::Uuid, level: crate::types::LogLevel, message: &[u8]);
+    fn send(&self, job_id: uuid::Uuid, run_id: uuid::Uuid, step_name: Option<String>, level: crate::models::types::LogLevel, message: &[u8]);
 }
 
 #[derive(Debug, Clone)]
@@ -109,6 +109,9 @@ impl JobExecutor {
         // Execute steps in order (pre -> exec -> post)
         let mut results = Vec::new();
         let mut job_failed = false;
+        
+        // Create evaluation context
+        let mut eval_context = crate::utils::step_evaluator::StepEvaluationContext::from_job_context(&job);
 
         for step_type in [StepType::Pre, StepType::Exec, StepType::Post] {
             if job_failed && step_type == StepType::Post {
@@ -120,10 +123,79 @@ impl JobExecutor {
             let steps = self.get_steps_by_type(&job.config.steps, step_type);
 
             for (name, step) in steps {
-                let result = self.execute_step(&container_id, &name, &step, &job).await?;
-                results.push(result.clone());
+                // Evaluate if condition
+                if let Some(ref if_condition) = step.if_condition {
+                    match crate::utils::step_evaluator::StepEvaluator::evaluate_if_condition(
+                        if_condition,
+                        &eval_context,
+                    ) {
+                        Ok(should_run) => {
+                            if !should_run {
+                                info!(step = %name, condition = %if_condition, "Skipping step due to if condition");
+                                continue;
+                            }
+                        }
+                        Err(e) => {
+                            warn!(step = %name, condition = %if_condition, error = %e, "Failed to evaluate if condition, skipping step");
+                            continue;
+                        }
+                    }
+                }
+                
+                // Evaluate when condition
+                if let Some(ref when) = step.when {
+                    if !crate::utils::step_evaluator::StepEvaluator::should_run_when(when, job_failed) {
+                        info!(step = %name, "Skipping step due to when condition");
+                        continue;
+                    }
+                }
+                
+                // Execute step with retry logic
+                let mut result = None;
+                let max_attempts = step.retry.as_ref().map(|r| r.max_attempts).unwrap_or(1);
+                
+                for attempt in 1..=max_attempts {
+                    if attempt > 1 {
+                        if let Some(ref retry_policy) = step.retry {
+                            let delay = crate::utils::step_evaluator::StepEvaluator::calculate_retry_delay(
+                                retry_policy,
+                                attempt,
+                            );
+                            info!(step = %name, attempt = attempt, delay_secs = delay.as_secs(), "Retrying step after delay");
+                            tokio::time::sleep(delay).await;
+                        }
+                    }
+                    
+                    match self.execute_step(&container_id, &name, &step, &job).await {
+                        Ok(step_result) => {
+                            result = Some(step_result.clone());
+                            
+                            // If step succeeded or we're on last attempt, break
+                            if step_result.exit_code == 0 || attempt == max_attempts {
+                                break;
+                            }
+                            
+                            // If continue_on_error is true, break even on failure
+                            if step.continue_on_error {
+                                break;
+                            }
+                        }
+                        Err(e) => {
+                            if attempt == max_attempts {
+                                return Err(e);
+                            }
+                            warn!(step = %name, attempt = attempt, error = %e, "Step execution failed, will retry");
+                        }
+                    }
+                }
+                
+                let step_result = result.expect("Step result should be set");
+                results.push(step_result.clone());
+                
+                // Update evaluation context with this step's result
+                eval_context.previous_steps.insert(name.clone(), step_result.clone());
 
-                if result.exit_code != 0 && !step.continue_on_error {
+                if step_result.exit_code != 0 && !step.continue_on_error {
                     job_failed = true;
                     if step_type != StepType::Post {
                         break;
@@ -159,7 +231,7 @@ impl JobExecutor {
         Ok(result)
     }
 
-    async fn pull_image(&self, image: &crate::types::DockerImage) -> Result<(), ExecutionError> {
+    async fn pull_image(&self, image: &crate::models::types::DockerImage) -> Result<(), ExecutionError> {
         let image_name = if let Some(ref registry) = image.registry {
             format!("{}/{}:{}", registry, image.name, image.tag)
         } else {
@@ -167,18 +239,18 @@ impl JobExecutor {
         };
 
         match image.pull_policy {
-            crate::types::PullPolicy::Never => {
+            crate::models::types::PullPolicy::Never => {
                 info!("Skipping image pull (policy: Never)");
                 return Ok(());
             }
-            crate::types::PullPolicy::IfNotPresent => {
+            crate::models::types::PullPolicy::IfNotPresent => {
                 // Check if image exists
                 if self.docker.inspect_image(&image_name).await.is_ok() {
                     info!("Image {} already exists, skipping pull", image_name);
                     return Ok(());
                 }
             }
-            crate::types::PullPolicy::Always => {
+            crate::models::types::PullPolicy::Always => {
                 // Always pull
             }
         }
@@ -227,8 +299,8 @@ impl JobExecutor {
                 &container_name,
                 None::<bollard::query_parameters::InspectContainerOptions>,
             )
-            .await
-            && let Some(id) = existing.id.as_ref() {
+            .await {
+            if let Some(id) = existing.id.as_ref() {
                 warn!("Found existing container {}, removing it", container_name);
                 let _ = self
                     .docker
@@ -239,6 +311,7 @@ impl JobExecutor {
                     .remove_container(id, None::<RemoveContainerOptions>)
                     .await;
             }
+        }
 
         let mut host_config = HostConfig::default();
         host_config.cpu_quota = Some((self.config.cpu_limit * 100_000.0) as i64);
@@ -433,13 +506,13 @@ impl JobExecutor {
                         Ok(bollard::container::LogOutput::StdOut { message }) => {
                             stdout.extend_from_slice(&message);
                             if let Some(ref streamer) = self.log_streamer {
-                                streamer.send(job.job_id, crate::types::LogLevel::Info, &message);
+                                streamer.send(job.job_id, job.run_id, Some(name.to_string()), crate::models::types::LogLevel::Info, &message);
                             }
                         }
                         Ok(bollard::container::LogOutput::StdErr { message }) => {
                             stderr.extend_from_slice(&message);
                             if let Some(ref streamer) = self.log_streamer {
-                                streamer.send(job.job_id, crate::types::LogLevel::Error, &message);
+                                streamer.send(job.job_id, job.run_id, Some(name.to_string()), crate::models::types::LogLevel::Error, &message);
                             }
                         }
                         Ok(bollard::container::LogOutput::StdIn { message }) => {
@@ -498,10 +571,10 @@ impl JobExecutor {
         _job: &JobContext,
     ) -> Result<CreateExecOptions<String>, ExecutionError> {
         let shell_cmd = match step.shell {
-            crate::types::Shell::Bash => "bash",
-            crate::types::Shell::Sh => "sh",
-            crate::types::Shell::Python => "python",
-            crate::types::Shell::Node => "node",
+            crate::models::types::Shell::Bash => "bash",
+            crate::models::types::Shell::Sh => "sh",
+            crate::models::types::Shell::Python => "python",
+            crate::models::types::Shell::Node => "node",
         };
 
         let mut cmd = vec![shell_cmd.to_string(), "-c".to_string(), script.to_string()];

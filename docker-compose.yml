@@ -1,33 +1,9 @@
 services:
-  rabbitmq:
-    image: rabbitmq:4.2-management-alpine
-    container_name: ci-rabbitmq
-    hostname: rabbitmq
-    ports:
-      - "5672:5672"
-      - "15672:15672"  # Management UI
-    environment:
-      RABBITMQ_DEFAULT_USER: ci_user
-      RABBITMQ_DEFAULT_PASS: ci_pass
-      RABBITMQ_DEFAULT_VHOST: /ci
-    volumes:
-      - rabbitmq_data:/var/lib/rabbitmq
-    networks:
-      - ci-network
-    healthcheck:
-      test: ["CMD", "rabbitmq-diagnostics", "ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
   ci-runner-dev:
     build:
       context: .
       dockerfile: Dockerfile.dev
     container_name: ci-runner-dev
-    depends_on:
-      rabbitmq:
-        condition: service_healthy
     volumes:
       # Mount source code for hot-reloading
       - ./crates:/app/crates:ro
@@ -41,7 +17,7 @@ services:
       # Mount workspaces and cache directories
       # Use Docker volume for workspaces to allow mounting into job containers (Docker Desktop Mac requirement)
       - ci-workspaces:/app/workspaces
-      - ./cache:/app/cache
+      - ci-cache:/app/cache
       # Mount target directory for faster builds (optional)
       - ci_runner_target:/app/target
     environment:
@@ -50,17 +26,23 @@ services:
       - GS_SERVICE_TOKEN=${GS_SERVICE_TOKEN:-dummy_token}
       - CARGO_TARGET_DIR=/app/target
     ports:
-      - "8080:8080"
-      - "9090:9090"
+      - "8080:8080"  # HTTP API (job submission, status, replay/retry, SSE streams)
+      - "9090:9090"  # Prometheus metrics endpoint
     networks:
       - ci-network
     command: cargo watch --ignore "workspaces/**" --ignore "cache/**" --ignore "target/**" -x "run --bin ci_runner"
     restart: unless-stopped
+    # Health check (optional)
+    # healthcheck:
+    #   test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+    #   interval: 30s
+    #   timeout: 10s
+    #   retries: 3
 
 volumes:
-  rabbitmq_data:
   ci_runner_target:
   ci-workspaces:
+  ci-cache:
 
 networks:
   ci-network:

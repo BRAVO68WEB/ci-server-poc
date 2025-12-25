@@ -6,34 +6,24 @@ use std::time::Duration;
 fn deserialize_duration<'de, D>(deserializer: D) -> Result<Duration, D::Error>
 where
     D: Deserializer<'de>,
-{
-    
+{   
     let secs = u64::deserialize(deserializer)?;
     Ok(Duration::from_secs(secs))
-}
-
-// Custom deserializer for Option<Duration>
-fn deserialize_option_duration<'de, D>(deserializer: D) -> Result<Option<Duration>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    
-    match Option::<u64>::deserialize(deserializer)? {
-        Some(secs) => Ok(Some(Duration::from_secs(secs))),
-        None => Ok(None),
-    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Config {
     pub server: ServerConfig,
     pub git_server: GitServerConfig,
-    pub queue: QueueConfig,
     pub executor: ExecutorConfig,
     pub log_streamer: LogStreamerConfig,
     pub security: SecurityConfig,
     pub logging: LoggingConfig,
     pub metrics: MetricsConfig,
+    #[serde(default)]
+    pub store: StoreConfig,
+    #[serde(default)]
+    pub auth: AuthConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -49,31 +39,6 @@ pub struct GitServerConfig {
     pub service_token_path: PathBuf,
     #[serde(deserialize_with = "deserialize_duration")]
     pub api_timeout: Duration,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct QueueConfig {
-    pub host: String,
-    pub port: u16,
-    pub virtual_host: String,
-    pub queue_name: String,
-    pub dead_letter_queue: String,
-    pub prefetch_count: u16,
-    pub username_file: Option<PathBuf>,
-    pub password_file: Option<PathBuf>,
-    #[serde(deserialize_with = "deserialize_option_duration")]
-    pub connection_timeout: Option<Duration>,
-    #[serde(deserialize_with = "deserialize_option_duration")]
-    pub heartbeat: Option<Duration>,
-    pub tls: Option<TlsConfig>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct TlsConfig {
-    pub enabled: bool,
-    pub ca_cert_path: Option<PathBuf>,
-    pub client_cert_path: Option<PathBuf>,
-    pub client_key_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -170,6 +135,68 @@ pub struct MetricsConfig {
     pub enabled: bool,
     pub port: u16,
     pub path: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct StoreConfig {
+    #[serde(default = "default_store_type")]
+    pub store_type: String,
+    #[serde(default)]
+    pub redis_url: Option<String>,
+    #[serde(default = "default_redis_prefix")]
+    pub redis_prefix: String,
+    #[serde(default = "default_max_history")]
+    pub max_history: usize,
+}
+
+fn default_store_type() -> String {
+    "memory".to_string()
+}
+
+fn default_redis_prefix() -> String {
+    "ci_runner".to_string()
+}
+
+fn default_max_history() -> usize {
+    1000
+}
+
+impl Default for StoreConfig {
+    fn default() -> Self {
+        Self {
+            store_type: "memory".to_string(),
+            redis_url: None,
+            redis_prefix: "ci_runner".to_string(),
+            max_history: 1000,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct AuthConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub api_keys: Vec<String>,
+    #[serde(default)]
+    pub api_key_file: Option<PathBuf>,
+    #[serde(default = "default_rate_limit")]
+    pub rate_limit_per_minute: u32,
+}
+
+fn default_rate_limit() -> u32 {
+    60
+}
+
+impl Default for AuthConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            api_keys: Vec::new(),
+            api_key_file: None,
+            rate_limit_per_minute: 60,
+        }
+    }
 }
 
 impl Config {

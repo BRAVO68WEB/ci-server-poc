@@ -11,23 +11,6 @@ git_server:
   service_token_path: ""
   api_timeout: 30  # seconds
 
-queue:
-  host: ""  # Use service name in docker-compose
-  port: ""
-  virtual_host: "/ci"
-  queue_name: "ci.jobs"
-  dead_letter_queue: "ci.jobs.dlq"
-  prefetch_count: 1
-  username_file: ""
-  password_file: ""
-  connection_timeout: 30  # seconds
-  heartbeat: 60  # seconds
-  tls:
-    enabled: false
-    ca_cert_path: ""
-    client_cert_path: ""
-    client_key_path: ""
-
 executor:
   max_concurrent_jobs: 10
   workspace_root: "/app/workspaces"
@@ -85,4 +68,30 @@ metrics:
   enabled: true
   port: 9090
   path: "/metrics"
+
+# Job storage configuration
+# Supports in-memory (default) or Redis for persistence
+store:
+  store_type: "memory"  # memory | redis
+  redis_url: "redis://localhost:6379"  # Only used if store_type is redis
+  redis_prefix: "ci_runner"  # Key prefix for Redis keys
+  max_history: 1000  # Maximum number of jobs to keep in history (for in-memory store)
+
+# Authentication and authorization
+# API key authentication for job submission and management endpoints
+auth:
+  enabled: false  # Set to true to enable API key authentication
+  api_keys: []  # List of API keys (or use api_key_file)
+  api_key_file: null  # Path to file containing API keys (one per line)
+  rate_limit_per_minute: 60  # Rate limit per API key
+
+# Artifact storage configuration
+# Artifacts are stored in the cache_root/artifacts directory
+# Artifact retention policies can be configured per job
+
+# New Features:
+# - Job Replay/Retry: POST /api/v1/jobs/{job_id}/replay and /retry endpoints
+# - Real-time Updates: GET /api/v1/jobs/{job_id}/stream (Server-Sent Events)
+# - Conditional Steps: Configure in runner.yaml with 'if', 'when', and 'retry' fields
+# - OpenAPI Docs: GET /api-docs/openapi.json and /api-docs (Scalar UI)
 

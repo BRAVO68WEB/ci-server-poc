@@ -1,5 +1,5 @@
-use crate::error::{ExecutionError, ParseError};
-use crate::types::{RunnerConfig, Step};
+use crate::models::error::{ExecutionError, ParseError};
+use crate::models::types::{RunnerConfig, Step};
 use regex::Regex;
 use std::collections::HashMap;
 use std::path::Path;
@@ -68,7 +68,7 @@ impl TaskParser {
         Ok(())
     }
 
-    fn validate_image(&self, image: &crate::types::DockerImage) -> Result<(), ExecutionError> {
+    fn validate_image(&self, image: &crate::models::types::DockerImage) -> Result<(), ExecutionError> {
         if image.name.is_empty() {
             return Err(ExecutionError::ParseError(ParseError::ValidationFailed(
                 "Image name cannot be empty".to_string(),
@@ -95,7 +95,7 @@ impl TaskParser {
 
     fn validate_triggers(
         &self,
-        triggers: &crate::types::TriggerConditions,
+        triggers: &crate::models::types::TriggerConditions,
     ) -> Result<(), ExecutionError> {
         if triggers.push.is_empty() && triggers.tag.is_empty() {
             return Err(ExecutionError::ParseError(ParseError::ValidationFailed(

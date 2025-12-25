@@ -1,5 +1,5 @@
-use crate::error::ScheduleError;
-use crate::types::JobEvent;
+use crate::models::error::ScheduleError;
+use crate::models::types::JobEvent;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{RwLock, Semaphore};
@@ -9,7 +9,7 @@ use uuid::Uuid;
 pub struct JobHandle {
     pub job_id: Uuid,
     pub handle:
-        tokio::task::JoinHandle<Result<crate::types::JobResult, crate::error::ExecutionError>>,
+        tokio::task::JoinHandle<Result<crate::models::types::JobResult, crate::models::error::ExecutionError>>,
 }
 
 pub struct JobScheduler {
@@ -31,7 +31,7 @@ impl JobScheduler {
     where
         F: FnOnce(JobEvent) -> Fut + Send + 'static,
         Fut: std::future::Future<
-                Output = Result<crate::types::JobResult, crate::error::ExecutionError>,
+                Output = Result<crate::models::types::JobResult, crate::models::error::ExecutionError>,
             > + Send
             + 'static,
     {
@@ -72,7 +72,7 @@ impl JobScheduler {
         let handle = tokio::spawn(async move {
             // Acquire permit (blocks if at capacity)
             let permit = semaphore_owned.acquire().await.map_err(|_| {
-                crate::error::ExecutionError::ConfigError(
+                crate::models::error::ExecutionError::ConfigError(
                     "Failed to acquire semaphore permit".to_string(),
                 )
             })?;

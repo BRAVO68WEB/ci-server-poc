@@ -1,12 +1,9 @@
-mod app;
-
 use actix_web::web;
-use ci_runner::{api, config, queue};
+use ci_runner::{routes, config, core};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::signal;
 use tracing::{error, info, warn};
-use tracing_subscriber;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -51,8 +48,62 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         })?;
     let auth_token = auth_token.trim().to_string();
 
+    // Initialize metrics
+    ci_runner::utils::metrics::Metrics::init();
+    info!("Metrics initialized");
+
+    // Initialize job store
+    let job_store = Arc::new(ci_runner::stores::memory::JobStore::new(config.store.max_history));
+    info!("Job store initialized");
+
+    // Initialize artifact store
+    let artifact_store = Arc::new(ci_runner::stores::artifacts::ArtifactStore::new(
+        config.executor.cache_root.join("artifacts"),
+    ));
+    artifact_store.initialize().await.map_err(|e| {
+        error!("Failed to initialize artifact store: {}", e);
+        e
+    })?;
+    info!("Artifact store initialized");
+
+    // Initialize SSE event broadcaster
+    let event_broadcaster = Arc::new(ci_runner::libs::sse::JobEventBroadcaster::new());
+    info!("Event broadcaster initialized");
+
+    // Initialize auth state
+    let mut api_keys = std::collections::HashSet::new();
+    if config.auth.enabled {
+        // Load API keys from config
+        for key in &config.auth.api_keys {
+            api_keys.insert(key.clone());
+        }
+        
+        // Load API keys from file if specified
+        if let Some(ref api_key_file) = config.auth.api_key_file {
+            if let Ok(contents) = tokio::fs::read_to_string(api_key_file).await {
+                for line in contents.lines() {
+                    let key = line.trim();
+                    if !key.is_empty() {
+                        api_keys.insert(key.to_string());
+                    }
+                }
+            }
+        }
+        
+        info!("Authentication enabled with {} API keys", api_keys.len());
+    } else {
+        info!("Authentication disabled");
+    }
+
+    let auth_state = web::Data::new(ci_runner::middleware::auth::AuthState {
+        api_keys: Arc::new(api_keys),
+        rate_limiter: Arc::new(ci_runner::middleware::auth::RateLimiter::new(
+            config.auth.rate_limit_per_minute,
+        )),
+    });
+
     // Initialize application
-    let app = app::App::initialize(&config).await?;
+    let app = core::App::initialize(&config).await?;
 
     // Create job handler
     let docker_clone = docker.clone();
@@ -67,12 +118,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let auth_token = auth_token_clone.clone();
 
         async move {
-            use ci_runner::cloner::{RepositoryCloner, ServiceAuth, TokenType};
-            use ci_runner::event_publisher::EventPublisher;
-            use ci_runner::executor::{JobExecutor, LogStreamerTrait};
-            use ci_runner::log_streamer::LogStreamer;
-            use ci_runner::parser::TaskParser;
-            use ci_runner::types::{JobCompletionEvent, JobContext};
+            use ci_runner::services::cloner::{RepositoryCloner, ServiceAuth, TokenType};
+            use ci_runner::services::event_publisher::EventPublisher;
+            use ci_runner::services::executor::{JobExecutor, LogStreamerTrait};
+            use ci_runner::services::log_streamer::LogStreamer;
+            use ci_runner::services::parser::TaskParser;
+            use ci_runner::models::types::{JobCompletionEvent, JobContext};
 
             let job_id = job_event.job_id;
             let run_id = job_event.run_id;
@@ -100,12 +151,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 auth_token.clone(),
             ));
 
-            let executor_config = app::App::create_executor_config(&config);
+            let executor_config = core::App::create_executor_config(&config);
 
             // Clone repository
             let auth = ServiceAuth {
                 token_type: TokenType::Bearer,
-                token: secrecy::SecretString::new(auth_token),
+                token: secrecy::SecretString::new(auth_token.into()),
                 expiry: None,
             };
 
@@ -142,10 +193,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let executor = JobExecutor::new(docker, executor_config)
                 .with_log_streamer(log_streamer.clone() as Arc<dyn LogStreamerTrait>);
 
-            let result = executor.execute(job_context).await?;
+            let result = executor.execute(job_context.clone()).await?;
 
             // Publish completion event
-            let completion_event = JobCompletionEvent::from_result(job_id, run_id, &result);
+            let completion_event = JobCompletionEvent::from_result(
+                job_id,
+                run_id,
+                &result,
+                Some(&job_context.workspace_path),
+            ).await;
 
             if let Err(e) = event_publisher.publish(completion_event).await {
                 warn!(job_id = %job_id, error = %e, "Failed to publish completion event");
@@ -155,34 +211,64 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // Cleanup workspace
             cleanup_workspace().await;
 
-            Ok::<(), ci_runner::error::ExecutionError>(())
+            Ok::<ci_runner::models::types::JobResult, ci_runner::models::error::ExecutionError>(result)
         }
     };
-
-    // Start queue consumer
-    let mut queue_consumer = queue::QueueConsumer::new(config.queue.clone()).await?;
-    queue_consumer.consume(job_handler).await?;
 
     // Start HTTP server
     use actix_web::{App as ActixApp, HttpServer};
     let scheduler_for_server = Arc::clone(&app.scheduler);
+    let job_store_for_server = Arc::clone(&job_store);
+    let artifact_store_for_server = Arc::clone(&artifact_store);
+    let auth_state_for_server = auth_state.clone();
+    let event_broadcaster_for_server = Arc::clone(&event_broadcaster);
+    
+    // Wrap job handler in a boxed closure that matches the trait object signature
+    let job_handler_wrapper: Arc<dyn Fn(ci_runner::JobEvent) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<ci_runner::models::types::JobResult, ci_runner::models::error::ExecutionError>> + Send>> + Send + Sync> = 
+        Arc::new(move |event: ci_runner::JobEvent| -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<ci_runner::models::types::JobResult, ci_runner::models::error::ExecutionError>> + Send>> {
+            let future = job_handler(event);
+            Box::pin(future)
+        });
+    
     let server_addr = format!("{}:{}", config.server.host, config.server.port);
 
     info!("Starting HTTP server on {}", server_addr);
     let server_handle = tokio::spawn(async move {
         HttpServer::new(move || {
-            let app_state = api::AppState {
+            let app_state = routes::api::AppState {
                 scheduler: Arc::clone(&scheduler_for_server),
+                job_store: Arc::clone(&job_store_for_server),
+                artifact_store: Arc::clone(&artifact_store_for_server),
+                auth_state: Some(Arc::new(auth_state_for_server.get_ref().clone())),
+                job_handler: Arc::clone(&job_handler_wrapper),
+                event_broadcaster: Some(Arc::clone(&event_broadcaster_for_server)),
             };
+            
+            
+            
             ActixApp::new()
                 .app_data(web::Data::new(app_state))
-                .route("/health", web::get().to(api::health_check))
-                .route("/ready", web::get().to(api::readiness_check))
-                .route("/metrics", web::get().to(api::metrics_handler))
-                .route(
-                    "/api/v1/jobs/{job_id}/cancel",
-                    web::post().to(api::cancel_job),
-                )
+                .app_data(auth_state_for_server.clone())
+                // OpenAPI documentation endpoints
+                .route("/api-docs/openapi.json", web::get().to(routes::api::openapi_json))
+                .route("/api-docs", web::get().to(routes::api::scalar_docs))
+                // Health endpoints (no auth required)
+                .route("/health", web::get().to(routes::api::health_check))
+                .route("/ready", web::get().to(routes::api::readiness_check))
+                .route("/metrics", web::get().to(routes::api::metrics_handler))
+                // Job endpoints
+                .route("/api/v1/jobs", web::post().to(routes::api::submit_job))
+                .route("/api/v1/jobs", web::get().to(routes::api::list_jobs))
+                .route("/api/v1/jobs/{job_id}", web::get().to(routes::api::get_job_status))
+                .route("/api/v1/jobs/{job_id}/cancel", web::post().to(routes::api::cancel_job))
+                .route("/api/v1/jobs/{job_id}/replay", web::post().to(routes::api::replay_job))
+                .route("/api/v1/jobs/{job_id}/retry", web::post().to(routes::api::retry_job))
+                .route("/api/v1/jobs/{job_id}/logs", web::get().to(routes::api::get_job_logs))
+                .route("/api/v1/jobs/{job_id}/stream", web::get().to(ci_runner::libs::sse::stream_job_updates))
+                // Artifact endpoints
+                .route("/api/v1/jobs/{job_id}/artifacts", web::post().to(routes::api::upload_artifact))
+                .route("/api/v1/jobs/{job_id}/artifacts/{artifact_name}", web::get().to(routes::api::download_artifact))
+                .app_data(web::Data::new(event_broadcaster_for_server.clone()))
         })
         .bind(&server_addr)
         .expect("Failed to bind server")

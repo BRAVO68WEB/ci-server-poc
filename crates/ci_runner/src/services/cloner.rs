@@ -1,5 +1,5 @@
-use crate::error::{ExecutionError, GitError};
-use crate::types::RepositoryInfo;
+use crate::models::error::{ExecutionError, GitError};
+use crate::models::types::RepositoryInfo;
 use secrecy::SecretString;
 use std::path::{Path, PathBuf};
 use std::process::Command;

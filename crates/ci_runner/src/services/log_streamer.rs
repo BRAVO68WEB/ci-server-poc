@@ -1,6 +1,6 @@
 use crate::config::LogStreamerConfig;
-use crate::error::StreamError;
-use crate::types::{LogEntry, LogLevel};
+use crate::models::error::StreamError;
+use crate::models::types::{LogEntry, LogLevel};
 use chrono::Utc;
 use reqwest::Client;
 use std::collections::HashMap;
@@ -73,6 +73,17 @@ impl LogStreamer {
         level: LogLevel,
         message: &[u8],
     ) -> Result<(), StreamError> {
+        self.send_with_step(job_id, run_id, None, level, message).await
+    }
+
+    pub async fn send_with_step(
+        &self,
+        job_id: Uuid,
+        run_id: Uuid,
+        step_name: Option<String>,
+        level: LogLevel,
+        message: &[u8],
+    ) -> Result<(), StreamError> {
         let message_str = String::from_utf8_lossy(message).to_string();
 
         // Get next sequence number
@@ -88,7 +99,7 @@ impl LogStreamer {
             run_id,
             timestamp: Utc::now(),
             level,
-            step_name: None, // TODO: Track current step
+            step_name,
             message: message_str,
             sequence,
         };
@@ -177,15 +188,14 @@ impl LogStreamer {
 }
 
 // Implement the trait for executor integration
-impl crate::executor::LogStreamerTrait for LogStreamer {
-    fn send(&self, job_id: Uuid, level: crate::types::LogLevel, message: &[u8]) {
+impl crate::services::executor::LogStreamerTrait for LogStreamer {
+    fn send(&self, job_id: Uuid, run_id: Uuid, step_name: Option<String>, level: crate::models::types::LogLevel, message: &[u8]) {
         // This is a synchronous interface, but we need async
         // We'll use a channel or spawn a task
         let streamer = self.clone();
-        let run_id = Uuid::new_v4(); // TODO: Get actual run_id from context
         let message = message.to_vec();
         tokio::spawn(async move {
-            if let Err(e) = streamer.send(job_id, run_id, level, &message).await {
+            if let Err(e) = streamer.send_with_step(job_id, run_id, step_name, level, &message).await {
                 error!("Failed to send log: {}", e);
             }
         });

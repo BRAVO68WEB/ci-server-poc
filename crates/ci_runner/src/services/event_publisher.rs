@@ -1,6 +1,6 @@
 use crate::config::GitServerConfig;
-use crate::error::PublishError;
-use crate::types::{JobCompletionEvent, JobStatus, StepSummary};
+use crate::models::error::PublishError;
+use crate::models::types::{JobCompletionEvent, JobStatus, StepSummary};
 use reqwest::Client;
 use std::collections::HashMap;
 use tracing::{info, warn};
@@ -66,11 +66,12 @@ impl EventPublisher {
     }
 }
 
-impl crate::types::JobCompletionEvent {
-    pub fn from_result(
+impl crate::models::types::JobCompletionEvent {
+    pub async fn from_result(
         job_id: uuid::Uuid,
         run_id: uuid::Uuid,
-        result: &crate::types::JobResult,
+        result: &crate::models::types::JobResult,
+        workspace_path: Option<&std::path::Path>,
     ) -> Self {
         let steps: Vec<StepSummary> = result
             .steps
@@ -91,6 +92,14 @@ impl crate::types::JobCompletionEvent {
             })
             .collect();
 
+        // Collect artifacts from workspace if available
+        let artifacts = if let Some(workspace) = workspace_path {
+            let collector = crate::services::artifact_collector::ArtifactCollector::new();
+            collector.collect_artifacts(workspace, None).await.unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+
         Self {
             job_id,
             run_id,
@@ -100,7 +109,7 @@ impl crate::types::JobCompletionEvent {
             duration: result.duration(),
             exit_code: result.steps.last().map(|s| s.exit_code).unwrap_or(0),
             steps,
-            artifacts: Vec::new(), // TODO: Collect artifacts
+            artifacts,
             metadata: HashMap::new(),
         }
     }
