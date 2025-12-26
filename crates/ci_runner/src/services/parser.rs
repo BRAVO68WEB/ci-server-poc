@@ -1,7 +1,7 @@
 use crate::models::error::{ExecutionError, ParseError};
 use crate::models::types::{RunnerConfig, Step};
+use indexmap::IndexMap;
 use regex::Regex;
-use std::collections::HashMap;
 use std::path::Path;
 use std::time::Duration;
 use tokio::fs;
@@ -123,7 +123,7 @@ impl TaskParser {
         Ok(())
     }
 
-    fn validate_steps(&self, steps: &HashMap<String, Step>) -> Result<(), ExecutionError> {
+    fn validate_steps(&self, steps: &IndexMap<String, Step>) -> Result<(), ExecutionError> {
         if steps.is_empty() {
             return Err(ExecutionError::ParseError(ParseError::ValidationFailed(
                 "At least one step must be defined".to_string(),

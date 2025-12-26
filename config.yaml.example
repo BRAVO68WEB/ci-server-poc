@@ -81,6 +81,21 @@ store:
 # API key authentication for job submission and management endpoints
 auth:
   enabled: false  # Set to true to enable API key authentication
+
+# Artifact storage configuration
+# Supports local filesystem or S3-compatible storage
+artifacts:
+  storage_type: "local"  # "local" or "s3"
+  s3:
+    bucket: "ci-artifacts"  # S3 bucket name (required if storage_type is "s3")
+    region: "us-east-1"  # AWS region
+    endpoint: ""  # Optional: S3-compatible endpoint (e.g., for MinIO: "http://localhost:9000")
+    access_key_id: ""  # Optional: AWS access key ID (can also use access_key_id_path)
+    secret_access_key: ""  # Optional: AWS secret access key (can also use secret_access_key_path)
+    access_key_id_path: ""  # Optional: Path to file containing access key ID
+    secret_access_key_path: ""  # Optional: Path to file containing secret access key
+    path_style: false  # Use path-style URLs (set to true for MinIO)
+    public_url_base: ""  # Optional: Base URL for public artifact access (e.g., "https://artifacts.example.com")
   api_keys: []  # List of API keys (or use api_key_file)
   api_key_file: null  # Path to file containing API keys (one per line)
   rate_limit_per_minute: 60  # Rate limit per API key

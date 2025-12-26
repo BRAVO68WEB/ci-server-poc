@@ -119,6 +119,7 @@ impl ArtifactCollector {
             path: path.to_string_lossy().to_string(),
             size,
             checksum,
+            url: None,
         })
     }
 }

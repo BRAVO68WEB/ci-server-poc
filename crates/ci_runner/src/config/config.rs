@@ -24,6 +24,8 @@ pub struct Config {
     pub store: StoreConfig,
     #[serde(default)]
     pub auth: AuthConfig,
+    #[serde(default)]
+    pub artifacts: ArtifactConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -195,6 +197,47 @@ impl Default for AuthConfig {
             api_keys: Vec::new(),
             api_key_file: None,
             rate_limit_per_minute: 60,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ArtifactConfig {
+    #[serde(default = "default_storage_type")]
+    pub storage_type: String, // "local" or "s3"
+    #[serde(default)]
+    pub s3: Option<S3Config>,
+}
+
+fn default_storage_type() -> String {
+    "local".to_string()
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct S3Config {
+    pub bucket: String,
+    pub region: String,
+    #[serde(default)]
+    pub endpoint: Option<String>, // For S3-compatible services (MinIO, etc.)
+    #[serde(default)]
+    pub access_key_id: Option<String>,
+    #[serde(default)]
+    pub secret_access_key: Option<String>,
+    #[serde(default)]
+    pub access_key_id_path: Option<PathBuf>,
+    #[serde(default)]
+    pub secret_access_key_path: Option<PathBuf>,
+    #[serde(default)]
+    pub path_style: bool, // Use path-style URLs (for MinIO)
+    #[serde(default)]
+    pub public_url_base: Option<String>, // Base URL for public artifact access
+}
+
+impl Default for ArtifactConfig {
+    fn default() -> Self {
+        Self {
+            storage_type: "local".to_string(),
+            s3: None,
         }
     }
 }

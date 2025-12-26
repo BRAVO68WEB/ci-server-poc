@@ -1,0 +1,103 @@
+# Example: Building a Flutter APK
+# This runner configuration builds a Flutter Android APK
+# 
+# Prerequisites:
+# - Flutter project with Android support
+# - Android SDK and build tools configured
+# - Keystore file for signing (optional, for release builds)
+#
+# Usage:
+# Place this file as `runner.yaml` in your Flutter project root
+
+image:
+  name: "ghcr.io/cirruslabs/flutter"
+  tag: "stable"
+  pull_policy: "IfNotPresent"
+
+on:
+  push:
+    - "main"
+    - "develop"
+  tag:
+    - "v*"
+
+global_env:
+  FLUTTER_ROOT: "/usr/local/flutter"
+  ANDROID_HOME: "/opt/android/sdk"
+  PATH: "/usr/local/flutter/bin:/opt/android/sdk/tools:/opt/android/sdk/platform-tools:$PATH"
+
+timeout: 3600  # 1 hour
+
+steps:
+  setup:
+    type: "pre"
+    scripts:
+      - flutter --version
+      - flutter doctor -v
+      - flutter pub get
+
+  analyze:
+    type: "exec"
+    scripts:
+      - flutter analyze
+    continue_on_error: false
+
+  test:
+    type: "exec"
+    scripts:
+      - flutter test
+    continue_on_error: false
+
+  build_apk:
+    type: "exec"
+    scripts:
+      - |
+        # Build APK
+        flutter build apk --release
+        
+        # Optional: Build app bundle for Play Store
+        # flutter build appbundle --release
+    envs:
+      BUILD_NUMBER: "${CI_BUILD_NUMBER:-1}"
+      BUILD_NAME: "${CI_BUILD_NAME:-1.0.0}"
+    continue_on_error: false
+
+  sign_apk:
+    type: "exec"
+    scripts:
+      - |
+        # Sign APK if keystore is available
+        if [ -f "$KEYSTORE_FILE" ]; then
+          jarsigner -verbose -sigalg SHA256withRSA -digestalg SHA-256 \
+            -keystore "$KEYSTORE_FILE" \
+            -storepass "$KEYSTORE_PASSWORD" \
+            build/app/outputs/flutter-apk/app-release.apk \
+            "$KEYSTORE_ALIAS"
+          
+          # Align APK
+          zipalign -v 4 \
+            build/app/outputs/flutter-apk/app-release.apk \
+            build/app/outputs/flutter-apk/app-release-signed.apk
+        fi
+    envs:
+      KEYSTORE_FILE: "${KEYSTORE_FILE:-}"
+      KEYSTORE_PASSWORD: "${KEYSTORE_PASSWORD:-}"
+      KEYSTORE_ALIAS: "${KEYSTORE_ALIAS:-}"
+    continue_on_error: true
+    when: "on_success"
+
+  upload_artifacts:
+    type: "post"
+    scripts:
+      - |
+        # Upload APK artifacts
+        if [ -f "build/app/outputs/flutter-apk/app-release.apk" ]; then
+          echo "APK built successfully"
+          ls -lh build/app/outputs/flutter-apk/
+        fi
+        
+        if [ -f "build/app/outputs/flutter-apk/app-release-signed.apk" ]; then
+          echo "Signed APK available"
+        fi
+    when: "always"
+

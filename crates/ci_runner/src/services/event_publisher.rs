@@ -3,7 +3,11 @@ use crate::models::error::PublishError;
 use crate::models::types::{JobCompletionEvent, JobStatus, StepSummary};
 use reqwest::Client;
 use std::collections::HashMap;
+use std::time::Duration;
 use tracing::{info, warn};
+
+const MAX_RETRIES: u32 = 3;
+const INITIAL_BACKOFF_MS: u64 = 500;
 
 pub struct EventPublisher {
     http_client: Client,
@@ -32,10 +36,42 @@ impl EventPublisher {
             "Publishing job completion event"
         );
 
-        // Publish to HTTP API
-        self.publish_to_http(&event).await?;
+        // Publish to HTTP API with retry logic
+        self.publish_to_http_with_retry(&event).await?;
 
         Ok(())
+    }
+
+    async fn publish_to_http_with_retry(&self, event: &JobCompletionEvent) -> Result<(), PublishError> {
+        let mut last_error = None;
+        
+        for attempt in 0..MAX_RETRIES {
+            match self.publish_to_http(event).await {
+                Ok(()) => return Ok(()),
+                Err(e) => {
+                    let should_retry = matches!(&e, 
+                        PublishError::HttpError(status) if *status == 429 || *status >= 500
+                    ) || matches!(&e, PublishError::NetworkError(_));
+                    
+                    if should_retry && attempt < MAX_RETRIES - 1 {
+                        let backoff = Duration::from_millis(INITIAL_BACKOFF_MS * 2u64.pow(attempt));
+                        warn!(
+                            job_id = %event.job_id,
+                            attempt = attempt + 1,
+                            backoff_ms = backoff.as_millis(),
+                            error = %e,
+                            "Retrying event publish after backoff"
+                        );
+                        tokio::time::sleep(backoff).await;
+                        last_error = Some(e);
+                    } else {
+                        return Err(e);
+                    }
+                }
+            }
+        }
+        
+        Err(last_error.unwrap_or(PublishError::HttpError(500)))
     }
 
     async fn publish_to_http(&self, event: &JobCompletionEvent) -> Result<(), PublishError> {
@@ -61,6 +97,11 @@ impl EventPublisher {
             );
             return Err(PublishError::HttpError(response.status().as_u16()));
         }
+
+        info!(
+            job_id = %event.job_id,
+            "Event published successfully"
+        );
 
         Ok(())
     }
@@ -93,6 +134,7 @@ impl crate::models::types::JobCompletionEvent {
             .collect();
 
         // Collect artifacts from workspace if available
+        // Note: Artifacts from post steps are collected and uploaded separately in main.rs
         let artifacts = if let Some(workspace) = workspace_path {
             let collector = crate::services::artifact_collector::ArtifactCollector::new();
             collector.collect_artifacts(workspace, None).await.unwrap_or_default()

@@ -38,18 +38,17 @@ pub async fn scalar_docs() -> ActixResult<impl Responder> {
 }
 
 
-#[derive(Clone)]
 pub struct AppState {
-    pub scheduler: Arc<crate::scheduler::JobScheduler>,
-    pub job_store: Arc<crate::store::JobStore>,
-    pub artifact_store: Arc<crate::artifacts::ArtifactStore>,
-    pub auth_state: Option<Arc<crate::auth::AuthState>>,
-    pub job_handler: Arc<dyn Fn(JobEvent) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<JobResult, crate::error::ExecutionError>> + Send>> + Send + Sync>,
-    pub event_broadcaster: Option<Arc<crate::sse::JobEventBroadcaster>>,
+    pub scheduler: Arc<crate::services::scheduler::JobScheduler>,
+    pub job_store: Arc<crate::stores::memory::JobStore>,
+    pub artifact_store: Arc<dyn crate::stores::artifact_trait::ArtifactStorage>,
+    pub auth_state: Option<Arc<crate::middleware::auth::AuthState>>,
+    pub job_handler: Arc<dyn Fn(JobEvent) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<JobResult, crate::models::error::ExecutionError>> + Send>> + Send + Sync>,
+    pub event_broadcaster: Option<Arc<crate::libs::sse::JobEventBroadcaster>>,
 }
 
 // Helper function to check auth
-async fn check_auth(req: &actix_web::HttpRequest, auth_state: &Option<Arc<crate::auth::AuthState>>) -> Result<(), HttpResponse> {
+async fn check_auth(req: &actix_web::HttpRequest, auth_state: &Option<Arc<crate::middleware::auth::AuthState>>) -> Result<(), HttpResponse> {
     if let Some(auth) = auth_state {
         if auth.api_keys.is_empty() {
             return Ok(()); // Auth disabled
@@ -165,7 +164,7 @@ pub async fn replay_job(
         let broadcaster_clone = broadcaster.clone();
         async move {
             let _ = store.update_job_status(event.job_id, JobStateStatus::Running).await;
-            crate::metrics::get_metrics().record_job_start();
+            crate::utils::metrics::get_metrics().record_job_start();
             
             if let Some(ref b) = broadcaster_clone {
                 b.broadcast_job_status(event.job_id, "running", None);
@@ -178,7 +177,7 @@ pub async fn replay_job(
                     let _ = store.set_job_result(event.job_id, job_result.clone()).await;
                     let duration = job_result.duration().as_secs_f64();
                     let status = format!("{:?}", job_result.status).to_lowercase();
-                    crate::metrics::get_metrics().record_job_complete(&status, duration);
+                    crate::utils::metrics::get_metrics().record_job_complete(&status, duration);
                     
                     if let Some(ref b) = broadcaster_clone {
                         b.broadcast_job_status(event.job_id, &status, Some(json!({
@@ -189,8 +188,8 @@ pub async fn replay_job(
                 Err(e) => {
                     let error_msg = e.to_string();
                     let _ = store.set_job_error(event.job_id, error_msg.clone()).await;
-                    crate::metrics::get_metrics().record_error("execution_error");
-                    crate::metrics::get_metrics().record_job_complete("failed", 0.0);
+                    crate::utils::metrics::get_metrics().record_error("execution_error");
+                    crate::utils::metrics::get_metrics().record_job_complete("failed", 0.0);
                     
                     if let Some(ref b) = broadcaster_clone {
                         b.broadcast_job_status(event.job_id, "failed", Some(json!({
@@ -293,7 +292,7 @@ pub async fn retry_job(
         let broadcaster_clone = broadcaster.clone();
         async move {
             let _ = store.update_job_status(event.job_id, JobStateStatus::Running).await;
-            crate::metrics::get_metrics().record_job_start();
+            crate::utils::metrics::get_metrics().record_job_start();
             
             if let Some(ref b) = broadcaster_clone {
                 b.broadcast_job_status(event.job_id, "running", None);
@@ -306,7 +305,7 @@ pub async fn retry_job(
                     let _ = store.set_job_result(event.job_id, job_result.clone()).await;
                     let duration = job_result.duration().as_secs_f64();
                     let status = format!("{:?}", job_result.status).to_lowercase();
-                    crate::metrics::get_metrics().record_job_complete(&status, duration);
+                    crate::utils::metrics::get_metrics().record_job_complete(&status, duration);
                     
                     if let Some(ref b) = broadcaster_clone {
                         b.broadcast_job_status(event.job_id, &status, Some(json!({
@@ -317,8 +316,8 @@ pub async fn retry_job(
                 Err(e) => {
                     let error_msg = e.to_string();
                     let _ = store.set_job_error(event.job_id, error_msg.clone()).await;
-                    crate::metrics::get_metrics().record_error("execution_error");
-                    crate::metrics::get_metrics().record_job_complete("failed", 0.0);
+                    crate::utils::metrics::get_metrics().record_error("execution_error");
+                    crate::utils::metrics::get_metrics().record_job_complete("failed", 0.0);
                     
                     if let Some(ref b) = broadcaster_clone {
                         b.broadcast_job_status(event.job_id, "failed", Some(json!({
@@ -400,19 +399,25 @@ pub async fn readiness_check(data: web::Data<AppState>) -> ActixResult<impl Resp
 pub async fn metrics_handler() -> ActixResult<impl Responder> {
     use prometheus::TextEncoder;
     
-    let encoder: TextEncoder = TextEncoder::new();
-    let metric_families: Vec<prometheus::proto::MetricFamily> = prometheus::gather();
-
-    println!("metric_families: {:?}", metric_families);
+    let encoder = TextEncoder::new();
+    let metric_families = prometheus::gather();
     
-    match encoder.encode(&metric_families, &mut Vec::new()) {
-        Ok(metrics) => Ok(HttpResponse::Ok()
-            .content_type("text/plain; version=0.0.4")
-            .body(metrics)),
+    // Create a mutable buffer for encoding
+    let mut buffer = Vec::new();
+    
+    match encoder.encode(&metric_families, &mut buffer) {
+        Ok(_) => {
+            // Ensure metrics are initialized (this ensures they're registered)
+            let _ = crate::utils::metrics::Metrics::init();
+            
+            Ok(HttpResponse::Ok()
+                .content_type("text/plain; version=0.0.4")
+                .body(buffer))
+        }
         Err(e) => {
             error!("Failed to encode metrics: {}", e);
             Ok(HttpResponse::InternalServerError()
-                .body("Failed to encode metrics"))
+                .body(format!("Failed to encode metrics: {}", e)))
         }
     }
 }
@@ -436,7 +441,7 @@ pub async fn submit_job(
     data: web::Data<AppState>,
     job_event: web::Json<JobEvent>,
 ) -> ActixResult<impl Responder> {
-    use crate::metrics::get_metrics;
+    use crate::utils::metrics::get_metrics;
     
     // Check auth
     if let Err(resp) = check_auth(&req, &data.auth_state).await {
@@ -603,6 +608,12 @@ pub async fn get_job_status(
                     "duration_secs": r.duration().as_secs(),
                 })),
                 "error": job.error,
+                "artifacts": job.artifacts.iter().map(|a| serde_json::json!({
+                    "name": a.name,
+                    "size": a.size,
+                    "checksum": a.checksum,
+                    "url": a.url,
+                })).collect::<Vec<_>>(),
             })))
         }
         None => Ok(HttpResponse::NotFound().json(json!({

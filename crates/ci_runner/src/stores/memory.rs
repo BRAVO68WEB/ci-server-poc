@@ -19,6 +19,9 @@ pub struct JobState {
     pub finished_at: Option<DateTime<Utc>>,
     pub result: Option<JobResult>,
     pub error: Option<String>,
+    /// Artifacts associated with this job (includes URLs if stored in S3)
+    #[serde(default)]
+    pub artifacts: Vec<crate::models::types::ArtifactInfo>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
@@ -73,6 +76,7 @@ impl JobStore {
             finished_at: None,
             result: None,
             error: None,
+            artifacts: Vec::new(),
         };
 
         jobs.insert(event.job_id, state);
@@ -114,6 +118,17 @@ impl JobStore {
             job.error = Some(error.clone());
             job.status = JobStateStatus::Failed;
             job.finished_at = Some(Utc::now());
+            Ok(())
+        } else {
+            Err(format!("Job {} not found", job_id))
+        }
+    }
+
+    pub async fn set_job_artifacts(&self, job_id: Uuid, artifacts: Vec<crate::models::types::ArtifactInfo>) -> Result<(), String> {
+        let mut jobs = self.jobs.write().await;
+        
+        if let Some(job) = jobs.get_mut(&job_id) {
+            job.artifacts = artifacts;
             Ok(())
         } else {
             Err(format!("Job {} not found", job_id))

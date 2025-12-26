@@ -5,10 +5,14 @@ use chrono::Utc;
 use reqwest::Client;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::Mutex;
 use tokio::time::interval;
-use tracing::{error, warn};
+use tracing::{error, info, warn};
 use uuid::Uuid;
+
+const MAX_RETRIES: u32 = 3;
+const INITIAL_BACKOFF_MS: u64 = 200;
 
 pub struct LogStreamer {
     client: Client,
@@ -142,32 +146,73 @@ impl LogStreamer {
                 .push(entry);
         }
 
-        // Send each group
+        // Send each group with retry logic
         for (job_id, job_entries) in grouped {
-            let url = format!(
-                "{}/api/v1/ci/jobs/{}/logs",
-                self.config.git_server.base_url, job_id
-            );
-
-            let response = self
-                .client
-                .post(&url)
-                .bearer_auth(&self.auth_token)
-                .json(&job_entries)
-                .send()
-                .await
-                .map_err(StreamError::NetworkError)?;
-
-            if !response.status().is_success() {
+            if let Err(e) = self.send_logs_with_retry(job_id, &job_entries).await {
+                // Log the error but don't fail the entire flush
+                // This allows other job logs to be sent even if one fails
                 warn!(
-                    "Failed to send logs for job {}: HTTP {}",
-                    job_id,
-                    response.status().as_u16()
+                    job_id = %job_id,
+                    error = %e,
+                    "Failed to send logs after retries, continuing with other jobs"
                 );
-                return Err(StreamError::HttpError(response.status().as_u16()));
             }
         }
 
+        Ok(())
+    }
+
+    async fn send_logs_with_retry(&self, job_id: Uuid, entries: &[LogEntry]) -> Result<(), StreamError> {
+        let url = format!(
+            "{}/api/v1/ci/jobs/{}/logs",
+            self.config.git_server.base_url, job_id
+        );
+
+        let mut last_error = None;
+        
+        for attempt in 0..MAX_RETRIES {
+            match self.send_logs_request(&url, entries).await {
+                Ok(()) => return Ok(()),
+                Err(e) => {
+                    let should_retry = matches!(&e, 
+                        StreamError::HttpError(status) if *status == 429 || *status >= 500
+                    ) || matches!(&e, StreamError::NetworkError(_));
+                    
+                    if should_retry && attempt < MAX_RETRIES - 1 {
+                        let backoff = Duration::from_millis(INITIAL_BACKOFF_MS * 2u64.pow(attempt));
+                        warn!(
+                            job_id = %job_id,
+                            attempt = attempt + 1,
+                            backoff_ms = backoff.as_millis(),
+                            "Retrying log send after backoff"
+                        );
+                        tokio::time::sleep(backoff).await;
+                        last_error = Some(e);
+                    } else {
+                        return Err(e);
+                    }
+                }
+            }
+        }
+        
+        Err(last_error.unwrap_or(StreamError::HttpError(500)))
+    }
+
+    async fn send_logs_request(&self, url: &str, entries: &[LogEntry]) -> Result<(), StreamError> {
+        let response = self
+            .client
+            .post(url)
+            .bearer_auth(&self.auth_token)
+            .json(entries)
+            .send()
+            .await
+            .map_err(StreamError::NetworkError)?;
+
+        if !response.status().is_success() {
+            return Err(StreamError::HttpError(response.status().as_u16()));
+        }
+
+        info!("Logs sent successfully for {} entries", entries.len());
         Ok(())
     }
 

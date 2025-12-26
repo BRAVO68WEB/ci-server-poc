@@ -1,10 +1,20 @@
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
+use indexmap::IndexMap;
+use serde::{Deserialize, Deserializer, Serialize};
 use utoipa::ToSchema;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Duration;
 use uuid::Uuid;
+
+// Custom deserializer for Option<Duration> that accepts integer seconds
+fn deserialize_option_duration<'de, D>(deserializer: D) -> Result<Option<Duration>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let secs: Option<u64> = Option::deserialize(deserializer)?;
+    Ok(secs.map(Duration::from_secs))
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct JobEvent {
@@ -61,10 +71,12 @@ pub enum JobPriority {
 pub struct RunnerConfig {
     pub image: DockerImage,
     pub on: TriggerConditions,
-    pub steps: HashMap<String, Step>,
+    /// Steps are stored in an IndexMap to preserve the order from the YAML file
+    #[schema(value_type = HashMap<String, Step>)]
+    pub steps: IndexMap<String, Step>,
     #[serde(default)]
     pub global_env: HashMap<String, String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_option_duration")]
     pub timeout: Option<Duration>,
 }
 
@@ -104,7 +116,7 @@ pub struct Step {
     pub envs: HashMap<String, String>,
     #[serde(default)]
     pub environment: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_option_duration")]
     pub timeout: Option<Duration>,
     #[serde(default)]
     pub continue_on_error: bool,
@@ -119,6 +131,10 @@ pub struct Step {
     pub when: Option<WhenCondition>,
     #[serde(default)]
     pub retry: Option<RetryPolicy>,
+    /// Artifacts to collect and compress (only used for post steps)
+    /// List of file/folder paths (supports glob patterns)
+    #[serde(default)]
+    pub artifacts: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -221,6 +237,9 @@ pub struct ArtifactInfo {
     pub path: String,
     pub size: u64,
     pub checksum: String,
+    /// URL to download the artifact (if stored in S3 or external storage)
+    #[serde(default)]
+    pub url: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]

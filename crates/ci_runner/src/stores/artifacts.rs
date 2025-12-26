@@ -2,8 +2,9 @@
 
 use crate::models::error::ExecutionError;
 use crate::models::types::ArtifactInfo;
+use crate::stores::artifact_trait::ArtifactStorage;
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::fs;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -63,6 +64,7 @@ impl ArtifactStore {
             path: artifact_path.to_string_lossy().to_string(),
             size,
             checksum,
+            url: None,
         };
 
         // Track artifact
@@ -107,6 +109,62 @@ impl ArtifactStore {
         // This is a simplified cleanup - in production, you'd want to track creation times
         // For now, we'll rely on the job store's cleanup
         Ok(())
+    }
+
+    pub async fn upload_artifact_from_file(
+        &self,
+        job_id: Uuid,
+        artifact_name: String,
+        file_path: &Path,
+    ) -> Result<ArtifactInfo, ExecutionError> {
+        let mut file = fs::File::open(file_path).await
+            .map_err(ExecutionError::IoError)?;
+        let mut data = Vec::new();
+        file.read_to_end(&mut data).await
+            .map_err(ExecutionError::IoError)?;
+
+        self.upload_artifact(job_id, artifact_name, data).await
+    }
+}
+
+#[async_trait::async_trait]
+impl ArtifactStorage for ArtifactStore {
+    async fn initialize(&self) -> Result<(), ExecutionError> {
+        self.initialize().await
+    }
+
+    async fn upload_artifact(
+        &self,
+        job_id: Uuid,
+        artifact_name: String,
+        data: Vec<u8>,
+    ) -> Result<ArtifactInfo, ExecutionError> {
+        self.upload_artifact(job_id, artifact_name, data).await
+    }
+
+    async fn upload_artifact_from_file(
+        &self,
+        job_id: Uuid,
+        artifact_name: String,
+        file_path: &Path,
+    ) -> Result<ArtifactInfo, ExecutionError> {
+        self.upload_artifact_from_file(job_id, artifact_name, file_path).await
+    }
+
+    async fn download_artifact(
+        &self,
+        job_id: Uuid,
+        artifact_name: &str,
+    ) -> Result<Vec<u8>, ExecutionError> {
+        self.download_artifact(job_id, artifact_name).await
+    }
+
+    async fn list_artifacts(&self, job_id: Uuid) -> Vec<ArtifactInfo> {
+        self.list_artifacts(job_id).await
+    }
+
+    async fn cleanup_old_artifacts(&self) -> Result<(), ExecutionError> {
+        self.cleanup_old_artifacts().await
     }
 }
 

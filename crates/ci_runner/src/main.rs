@@ -56,15 +56,37 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let job_store = Arc::new(ci_runner::stores::memory::JobStore::new(config.store.max_history));
     info!("Job store initialized");
 
-    // Initialize artifact store
-    let artifact_store = Arc::new(ci_runner::stores::artifacts::ArtifactStore::new(
-        config.executor.cache_root.join("artifacts"),
-    ));
-    artifact_store.initialize().await.map_err(|e| {
-        error!("Failed to initialize artifact store: {}", e);
-        e
-    })?;
-    info!("Artifact store initialized");
+    // Initialize artifact store (local or S3 based on config)
+    use std::sync::Arc as StdArc;
+    use ci_runner::stores::artifact_trait::ArtifactStorage;
+    let artifact_store: StdArc<dyn ArtifactStorage> = 
+        if config.artifacts.storage_type == "s3" {
+            if let Some(ref s3_config) = config.artifacts.s3 {
+                let s3_store = ci_runner::stores::s3_artifacts::S3ArtifactStore::new(s3_config.clone()).await
+                    .map_err(|e| {
+                        error!("Failed to initialize S3 artifact store: {}", e);
+                        e
+                    })?;
+                ArtifactStorage::initialize(&s3_store).await.map_err(|e| {
+                    error!("Failed to initialize S3 artifact store: {}", e);
+                    e
+                })?;
+                info!("S3 artifact store initialized");
+                StdArc::new(s3_store)
+            } else {
+                return Err("S3 storage type specified but S3 config is missing".into());
+            }
+        } else {
+            let local_store = ci_runner::stores::artifacts::ArtifactStore::new(
+                config.executor.cache_root.join("artifacts"),
+            );
+            ArtifactStorage::initialize(&local_store).await.map_err(|e| {
+                error!("Failed to initialize artifact store: {}", e);
+                e
+            })?;
+            info!("Local artifact store initialized");
+            StdArc::new(local_store)
+        };
 
     // Initialize SSE event broadcaster
     let event_broadcaster = Arc::new(ci_runner::libs::sse::JobEventBroadcaster::new());
@@ -110,12 +132,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let workspace_manager_clone = Arc::clone(&app.workspace_manager);
     let config_clone = config.clone();
     let auth_token_clone = auth_token.clone();
+    let artifact_store_clone = artifact_store.clone();
+    let job_store_clone = Arc::clone(&job_store);
 
     let job_handler = move |job_event: ci_runner::JobEvent| {
         let docker = docker_clone.clone();
         let workspace_manager = workspace_manager_clone.clone();
         let config = config_clone.clone();
         let auth_token = auth_token_clone.clone();
+        let artifact_store = artifact_store_clone.clone();
+        let job_store = job_store_clone.clone();
 
         async move {
             use ci_runner::services::cloner::{RepositoryCloner, ServiceAuth, TokenType};
@@ -194,6 +220,57 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .with_log_streamer(log_streamer.clone() as Arc<dyn LogStreamerTrait>);
 
             let result = executor.execute(job_context.clone()).await?;
+
+            // Collect and upload artifacts from post steps
+            let mut collected_artifacts = Vec::new();
+            
+            // Find all post steps with artifacts field
+            for (step_name, step) in &job_context.config.steps {
+                if step.step_type == ci_runner::models::types::StepType::Post && !step.artifacts.is_empty() {
+                    info!(step = %step_name, patterns = ?step.artifacts, "Collecting artifacts from post step");
+                    
+                    // Collect and compress artifacts
+                    match ci_runner::services::artifact_compressor::ArtifactCompressor::collect_and_compress(
+                        &job_context.workspace_path,
+                        &step.artifacts,
+                        job_id,
+                    ).await {
+                        Ok(compressed_artifacts) => {
+                            // Upload compressed artifacts to artifact store
+                            for artifact_info in &compressed_artifacts {
+                                let artifact_path = std::path::PathBuf::from(&artifact_info.path);
+                                if artifact_path.exists() {
+                                    match artifact_store.upload_artifact_from_file(
+                                        job_id,
+                                        artifact_info.name.clone(),
+                                        &artifact_path,
+                                    ).await {
+                                        Ok(uploaded_info) => {
+                                            info!(job_id = %job_id, artifact = %uploaded_info.name, url = ?uploaded_info.url, "Artifact uploaded successfully");
+                                            collected_artifacts.push(uploaded_info);
+                                        }
+                                        Err(e) => {
+                                            warn!(job_id = %job_id, artifact = %artifact_info.name, error = %e, "Failed to upload artifact");
+                                            // Still add the artifact info even if upload failed
+                                            collected_artifacts.push(artifact_info.clone());
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            warn!(step = %step_name, error = %e, "Failed to collect artifacts from post step");
+                        }
+                    }
+                }
+            }
+
+            // Update job state with artifacts
+            if !collected_artifacts.is_empty() {
+                if let Err(e) = (*job_store).set_job_artifacts(job_id, collected_artifacts.clone()).await {
+                    warn!(job_id = %job_id, error = %e, "Failed to update job artifacts");
+                }
+            }
 
             // Publish completion event
             let completion_event = JobCompletionEvent::from_result(

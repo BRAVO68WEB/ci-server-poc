@@ -1,0 +1,183 @@
+# Example: Building and Pushing Docker Image for Java Spring Boot
+# This runner configuration builds a Docker image for a Java Spring Boot application
+# and pushes it to both Docker Hub and GitHub Container Registry (GHCR)
+#
+# Prerequisites:
+# - Java Spring Boot project with Dockerfile at root
+# - Docker Hub credentials (DOCKERHUB_USERNAME, DOCKERHUB_TOKEN)
+# - GitHub token with package write permissions (GITHUB_TOKEN)
+#
+# Usage:
+# Place this file as `runner.yaml` in your Spring Boot project root
+
+image:
+  name: "docker"
+  tag: "dind"
+  pull_policy: "IfNotPresent"
+
+on:
+  push:
+    - "main"
+    - "develop"
+  tag:
+    - "v*"
+
+global_env:
+  DOCKER_BUILDKIT: "1"
+  COMPOSE_DOCKER_CLI_BUILD: "1"
+
+timeout: 3600  # 1 hour
+
+steps:
+  setup:
+    type: "pre"
+    scripts:
+      - docker --version
+      - docker info
+      - |
+        # Start Docker daemon (if using docker:dind)
+        if [ -f /var/run/docker.sock ]; then
+          echo "Docker socket available"
+        else
+          echo "Docker socket not found, assuming docker-in-docker setup"
+        fi
+
+  build_jar:
+    type: "exec"
+    scripts:
+      - |
+        # Build the Spring Boot JAR
+        ./mvnw clean package -DskipTests || mvn clean package -DskipTests
+        
+        # Verify JAR was created
+        if [ ! -f target/*.jar ]; then
+          echo "Error: JAR file not found"
+          exit 1
+        fi
+        
+        JAR_FILE=$(ls target/*.jar | grep -v sources | grep -v original | head -n 1)
+        echo "Built JAR: $JAR_FILE"
+        ls -lh "$JAR_FILE"
+    continue_on_error: false
+    timeout: 1800  # 30 minutes
+
+  test:
+    type: "exec"
+    scripts:
+      - ./mvnw test || mvn test
+    continue_on_error: false
+    timeout: 600  # 10 minutes
+
+  build_docker_image:
+    type: "exec"
+    scripts:
+      - |
+        # Determine image tags
+        VERSION=$(git describe --tags --always --dirty 2>/dev/null || echo "latest")
+        COMMIT_SHORT=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
+        BRANCH_NAME=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "main")
+        
+        # Base image name
+        IMAGE_NAME="${DOCKERHUB_USERNAME:-user}/${PROJECT_NAME:-spring-boot-app}"
+        GHCR_IMAGE_NAME="ghcr.io/${GITHUB_REPOSITORY_OWNER:-user}/${PROJECT_NAME:-spring-boot-app}"
+        
+        # Build Docker image
+        docker build \
+          --tag "${IMAGE_NAME}:${VERSION}" \
+          --tag "${IMAGE_NAME}:${COMMIT_SHORT}" \
+          --tag "${IMAGE_NAME}:latest" \
+          --tag "${GHCR_IMAGE_NAME}:${VERSION}" \
+          --tag "${GHCR_IMAGE_NAME}:${COMMIT_SHORT}" \
+          --tag "${GHCR_IMAGE_NAME}:latest" \
+          --build-arg VERSION="${VERSION}" \
+          --build-arg BUILD_TIME="$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
+          --build-arg COMMIT="${COMMIT_SHORT}" \
+          .
+        
+        # Verify image was built
+        docker images | grep "${IMAGE_NAME}"
+    envs:
+      PROJECT_NAME: "${PROJECT_NAME:-spring-boot-app}"
+      DOCKERHUB_USERNAME: "${DOCKERHUB_USERNAME}"
+      GITHUB_REPOSITORY_OWNER: "${GITHUB_REPOSITORY_OWNER}"
+    continue_on_error: false
+
+  login_dockerhub:
+    type: "exec"
+    scripts:
+      - |
+        echo "${DOCKERHUB_TOKEN}" | docker login -u "${DOCKERHUB_USERNAME}" --password-stdin docker.io
+    envs:
+      DOCKERHUB_USERNAME: "${DOCKERHUB_USERNAME}"
+      DOCKERHUB_TOKEN: "${DOCKERHUB_TOKEN}"
+    continue_on_error: false
+    when: "on_success"
+
+  push_dockerhub:
+    type: "exec"
+    scripts:
+      - |
+        VERSION=$(git describe --tags --always --dirty 2>/dev/null || echo "latest")
+        COMMIT_SHORT=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
+        IMAGE_NAME="${DOCKERHUB_USERNAME}/${PROJECT_NAME:-spring-boot-app}"
+        
+        # Push all tags to Docker Hub
+        docker push "${IMAGE_NAME}:${VERSION}"
+        docker push "${IMAGE_NAME}:${COMMIT_SHORT}"
+        docker push "${IMAGE_NAME}:latest"
+        
+        echo "Successfully pushed to Docker Hub: ${IMAGE_NAME}"
+    envs:
+      DOCKERHUB_USERNAME: "${DOCKERHUB_USERNAME}"
+      PROJECT_NAME: "${PROJECT_NAME:-spring-boot-app}"
+    continue_on_error: false
+    when: "on_success"
+    retry:
+      max_attempts: 3
+      backoff_multiplier: 2.0
+      initial_delay_secs: 5
+
+  login_ghcr:
+    type: "exec"
+    scripts:
+      - |
+        echo "${GITHUB_TOKEN}" | docker login -u "${GITHUB_REPOSITORY_OWNER}" --password-stdin ghcr.io
+    envs:
+      GITHUB_TOKEN: "${GITHUB_TOKEN}"
+      GITHUB_REPOSITORY_OWNER: "${GITHUB_REPOSITORY_OWNER}"
+    continue_on_error: false
+    when: "on_success"
+
+  push_ghcr:
+    type: "exec"
+    scripts:
+      - |
+        VERSION=$(git describe --tags --always --dirty 2>/dev/null || echo "latest")
+        COMMIT_SHORT=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
+        GHCR_IMAGE_NAME="ghcr.io/${GITHUB_REPOSITORY_OWNER}/${PROJECT_NAME:-spring-boot-app}"
+        
+        # Push all tags to GHCR
+        docker push "${GHCR_IMAGE_NAME}:${VERSION}"
+        docker push "${GHCR_IMAGE_NAME}:${COMMIT_SHORT}"
+        docker push "${GHCR_IMAGE_NAME}:latest"
+        
+        echo "Successfully pushed to GHCR: ${GHCR_IMAGE_NAME}"
+    envs:
+      GITHUB_REPOSITORY_OWNER: "${GITHUB_REPOSITORY_OWNER}"
+      PROJECT_NAME: "${PROJECT_NAME:-spring-boot-app}"
+    continue_on_error: false
+    when: "on_success"
+    retry:
+      max_attempts: 3
+      backoff_multiplier: 2.0
+      initial_delay_secs: 5
+
+  cleanup:
+    type: "post"
+    scripts:
+      - |
+        # Remove local images to save space
+        docker image prune -f
+        echo "Docker images pushed successfully"
+    when: "always"
+

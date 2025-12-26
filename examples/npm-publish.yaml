@@ -1,0 +1,188 @@
+# Example: Publishing NPM Package
+# This runner configuration builds and publishes an NPM package to the npm registry
+#
+# Prerequisites:
+# - Node.js project with package.json
+# - NPM_TOKEN environment variable with publish permissions
+# - Optional: NPM_REGISTRY for custom registry (defaults to registry.npmjs.org)
+#
+# Usage:
+# Place this file as `runner.yaml` in your Node.js project root
+
+image:
+  name: "node"
+  tag: "20-alpine"
+  pull_policy: "IfNotPresent"
+
+on:
+  tag:
+    - "v*"  # Only publish on version tags
+  push:
+    - "main"  # For testing builds
+
+global_env:
+  NODE_ENV: "production"
+  NPM_CONFIG_LOGLEVEL: "error"
+
+timeout: 1800  # 30 minutes
+
+steps:
+  setup:
+    type: "pre"
+    scripts:
+      - node --version
+      - npm --version
+      - |
+        # Configure npm registry if custom registry is provided
+        if [ -n "${NPM_REGISTRY}" ]; then
+          npm config set registry "${NPM_REGISTRY}"
+          echo "Using custom registry: ${NPM_REGISTRY}"
+        fi
+        
+        # Show registry configuration
+        npm config get registry
+
+  install:
+    type: "exec"
+    scripts:
+      - npm ci --prefer-offline --no-audit
+    continue_on_error: false
+    timeout: 600  # 10 minutes
+
+  lint:
+    type: "exec"
+    scripts:
+      - npm run lint || echo "No lint script found, skipping"
+    continue_on_error: true
+    if_condition: "${CI_SKIP_LINT:-false} != true"
+
+  test:
+    type: "exec"
+    scripts:
+      - npm test
+    continue_on_error: false
+    timeout: 600  # 10 minutes
+    if_condition: "${CI_SKIP_TESTS:-false} != false"
+
+  build:
+    type: "exec"
+    scripts:
+      - npm run build || echo "No build script found, skipping"
+    continue_on_error: false
+    timeout: 600  # 10 minutes
+    if_condition: "${CI_SKIP_BUILD:-false} != true"
+
+  version_check:
+    type: "exec"
+    scripts:
+      - |
+        # Extract version from package.json
+        PACKAGE_VERSION=$(node -p "require('./package.json').version")
+        echo "Package version: ${PACKAGE_VERSION}"
+        
+        # Check if version already exists in registry
+        if npm view "${PACKAGE_NAME:-$(node -p "require('./package.json').name")}"@"${PACKAGE_VERSION}" version > /dev/null 2>&1; then
+          echo "Warning: Version ${PACKAGE_VERSION} already exists in registry"
+          if [ "${CI_FORCE_PUBLISH:-false}" != "true" ]; then
+            echo "Skipping publish. Set CI_FORCE_PUBLISH=true to force publish."
+            exit 0
+          fi
+        else
+          echo "Version ${PACKAGE_VERSION} is new, proceeding with publish"
+        fi
+    envs:
+      PACKAGE_NAME: "${PACKAGE_NAME:-}"
+      CI_FORCE_PUBLISH: "${CI_FORCE_PUBLISH:-false}"
+    continue_on_error: false
+
+  prepare_publish:
+    type: "exec"
+    scripts:
+      - |
+        # Configure npm authentication
+        if [ -n "${NPM_TOKEN}" ]; then
+          # For npmjs.org
+          if [ -z "${NPM_REGISTRY}" ] || [ "${NPM_REGISTRY}" = "https://registry.npmjs.org" ]; then
+            echo "//registry.npmjs.org/:_authToken=${NPM_TOKEN}" > ~/.npmrc
+          else
+            # For custom registry
+            REGISTRY_HOST=$(echo "${NPM_REGISTRY}" | sed 's|https\?://||' | sed 's|/$||')
+            echo "//${REGISTRY_HOST}/:_authToken=${NPM_TOKEN}" > ~/.npmrc
+          fi
+          echo "NPM authentication configured"
+        else
+          echo "Error: NPM_TOKEN not set"
+          exit 1
+        fi
+        
+        # Verify authentication
+        npm whoami || (echo "Failed to authenticate with npm" && exit 1)
+    envs:
+      NPM_TOKEN: "${NPM_TOKEN}"
+      NPM_REGISTRY: "${NPM_REGISTRY:-https://registry.npmjs.org}"
+    continue_on_error: false
+    when: "on_success"
+
+  publish:
+    type: "exec"
+    scripts:
+      - |
+        # Determine publish tag
+        # Use 'latest' for main branch, 'beta' for pre-release versions, 'next' for develop
+        PACKAGE_VERSION=$(node -p "require('./package.json').version")
+        BRANCH_NAME=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "main")
+        
+        if echo "${PACKAGE_VERSION}" | grep -qE "-(alpha|beta|rc)"; then
+          PUBLISH_TAG="beta"
+        elif [ "${BRANCH_NAME}" = "develop" ]; then
+          PUBLISH_TAG="next"
+        else
+          PUBLISH_TAG="latest"
+        fi
+        
+        echo "Publishing ${PACKAGE_VERSION} with tag: ${PUBLISH_TAG}"
+        
+        # Publish to npm
+        npm publish --tag "${PUBLISH_TAG}" --access public
+        
+        echo "Successfully published ${PACKAGE_VERSION} with tag ${PUBLISH_TAG}"
+    envs:
+      NPM_TOKEN: "${NPM_TOKEN}"
+      NPM_REGISTRY: "${NPM_REGISTRY:-https://registry.npmjs.org}"
+    continue_on_error: false
+    when: "on_success"
+    retry:
+      max_attempts: 3
+      backoff_multiplier: 2.0
+      initial_delay_secs: 5
+    if_condition: "${CI_SKIP_PUBLISH:-false} != true"
+
+  verify_publish:
+    type: "exec"
+    scripts:
+      - |
+        PACKAGE_NAME=$(node -p "require('./package.json').name")
+        PACKAGE_VERSION=$(node -p "require('./package.json').version")
+        
+        # Wait a bit for npm registry to update
+        sleep 5
+        
+        # Verify package was published
+        PUBLISHED_VERSION=$(npm view "${PACKAGE_NAME}" version 2>/dev/null || echo "")
+        if [ "${PUBLISHED_VERSION}" = "${PACKAGE_VERSION}" ]; then
+          echo "✓ Verified: ${PACKAGE_NAME}@${PACKAGE_VERSION} is published"
+        else
+          echo "⚠ Warning: Published version (${PUBLISHED_VERSION}) doesn't match expected (${PACKAGE_VERSION})"
+        fi
+    continue_on_error: true
+    when: "on_success"
+
+  cleanup:
+    type: "post"
+    scripts:
+      - |
+        # Clean up npmrc file
+        rm -f ~/.npmrc
+        echo "Publish process completed"
+    when: "always"
+

@@ -28,11 +28,17 @@ config = "0.15.19"
 futures-util = "0.3"
 async-trait = "0.1"
 lru = "0.16.2"
-redis = { version = "0.26", features = ["tokio-comp", "connection-manager"] }
+redis = { version = "1.0.2", features = ["tokio-comp", "connection-manager"] }
 opentelemetry = "0.31.0"
-opentelemetry-otlp = "0.17"
+opentelemetry-otlp = "0.31.0"
 opentelemetry_sdk = "0.31.0"
 tracing-opentelemetry = "0.32.0"
 utoipa = { version = "5.4.0", features = ["actix_extras", "chrono", "uuid"] }
 parking_lot = "0.12"
 dashmap = "6.1.0"
+aws-sdk-s3 = "1.0"
+aws-credential-types = "1.0"
+flate2 = "1.0"
+tar = "0.4"
+zip = "7.0.0"
+indexmap = { version = "2.0", features = ["serde"] }
