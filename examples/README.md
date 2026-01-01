@@ -1,6 +1,6 @@
 # CI Runner Example Configurations
 
-This directory contains example `runner.yaml` configurations for common CI/CD use cases.
+This directory contains example `.stasis-ci.yaml` configurations for common CI/CD use cases.
 
 ## Available Examples
 
@@ -25,7 +25,7 @@ Builds a Flutter Android APK with optional signing.
 **Usage:**
 ```bash
 # Copy to your Flutter project root
-cp examples/flutter-apk.yaml /path/to/flutter/project/runner.yaml
+cp examples/flutter-apk.yaml /path/to/flutter/project/.stasis-ci.yaml
 ```
 
 ---
@@ -48,7 +48,7 @@ Compiles Go binaries for multiple platforms.
 **Usage:**
 ```bash
 # Copy to your Go project root
-cp examples/go-binary.yaml /path/to/go/project/runner.yaml
+cp examples/go-binary.yaml /path/to/go/project/.stasis-ci.yaml
 ```
 
 ---
@@ -79,7 +79,7 @@ Builds and pushes Docker images for Java Spring Boot applications to Docker Hub 
 **Usage:**
 ```bash
 # Copy to your Spring Boot project root
-cp examples/java-docker.yaml /path/to/spring-boot/project/runner.yaml
+cp examples/java-docker.yaml /path/to/spring-boot/project/.stasis-ci.yaml
 ```
 
 ---
@@ -113,14 +113,14 @@ Builds and publishes NPM packages to the npm registry.
 **Usage:**
 ```bash
 # Copy to your Node.js project root
-cp examples/npm-publish.yaml /path/to/node/project/runner.yaml
+cp examples/npm-publish.yaml /path/to/node/project/.stasis-ci.yaml
 ```
 
 ---
 
 ## Common Configuration
 
-All examples follow the same `runner.yaml` structure:
+All examples follow the same `.stasis-ci.yaml` structure:
 
 ```yaml
 image:

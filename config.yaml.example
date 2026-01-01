@@ -107,6 +107,6 @@ artifacts:
 # New Features:
 # - Job Replay/Retry: POST /api/v1/jobs/{job_id}/replay and /retry endpoints
 # - Real-time Updates: GET /api/v1/jobs/{job_id}/stream (Server-Sent Events)
-# - Conditional Steps: Configure in runner.yaml with 'if', 'when', and 'retry' fields
+# - Conditional Steps: Configure in .stasis-ci.yaml with 'if', 'when', and 'retry' fields
 # - OpenAPI Docs: GET /api-docs/openapi.json and /api-docs (Scalar UI)
 

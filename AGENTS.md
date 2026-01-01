@@ -81,7 +81,7 @@
 2. **Authentication**: API key authentication (if enabled) validates the request
 3. **Job Scheduling**: Scheduler queues the job and manages concurrent execution
 4. **Repository Cloning**: Cloner fetches the repository code into workspace
-5. **Configuration Parsing**: Parser reads `runner.yaml` from cloned repository
+5. **Configuration Parsing**: Parser reads `.stasis-ci.yaml` from cloned repository
 6. **Job Execution**: Executor creates Docker container and runs steps sequentially
 7. **Log Streaming**: Logs are streamed in real-time to external systems
 8. **Artifact Collection**: Post-steps collect and compress artifacts
@@ -114,7 +114,7 @@ crates/ci_runner/src/
 │   ├── scheduler.rs       # Job scheduling and concurrency
 │   ├── executor.rs        # Docker container execution
 │   ├── cloner.rs         # Git repository cloning
-│   ├── parser.rs         # runner.yaml parsing
+│   ├── parser.rs         # .stasis-ci.yaml parsing
 │   ├── log_streamer.rs    # Log streaming to external systems
 │   ├── event_publisher.rs # Job completion events
 │   ├── artifact_collector.rs  # Artifact discovery
@@ -219,7 +219,7 @@ crates/ci_runner/src/
 
 ### 4. Configuration Parser (`services/parser.rs`)
 
-**Responsibility**: Parses `runner.yaml` configuration files.
+**Responsibility**: Parses `.stasis-ci.yaml` configuration files.
 
 **Key Features**:
 - YAML parsing with validation
@@ -228,7 +228,7 @@ crates/ci_runner/src/
 - Retry policy parsing
 - Timeout parsing (supports integer seconds → Duration conversion)
 
-**Configuration Structure** (`runner.yaml`):
+**Configuration Structure** (`.stasis-ci.yaml`):
 ```yaml
 image: gcc:13-bookworm
 on:
@@ -369,7 +369,7 @@ pub struct JobContext {
 }
 ```
 
-**RunnerConfig**: Parsed `runner.yaml` configuration
+**RunnerConfig**: Parsed `.stasis-ci.yaml` configuration
 ```rust
 pub struct RunnerConfig {
     pub image: DockerImage,
@@ -577,7 +577,7 @@ open http://localhost:8080/api-docs
 
 ### Example Configurations
 
-See `examples/` directory for example `runner.yaml` files:
+See `examples/` directory for example `.stasis-ci.yaml` files:
 - `flutter-apk.yaml`: Building Flutter APK
 - `go-binary.yaml`: Compiling Go binaries for multiple platforms
 - `java-docker.yaml`: Building and pushing Docker images
@@ -622,7 +622,7 @@ See `examples/` directory for example `runner.yaml` files:
 **Solution**: Check volume mount configuration and ensure files are cloned before container starts
 
 **Issue**: Artifacts not collected  
-**Solution**: Verify artifact patterns in `runner.yaml` match actual file paths
+**Solution**: Verify artifact patterns in `.stasis-ci.yaml` match actual file paths
 
 **Issue**: Container creation fails  
 **Solution**: Check Docker socket permissions and network configuration

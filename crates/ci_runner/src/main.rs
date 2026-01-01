@@ -202,7 +202,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             };
 
-            // Parse runner.yaml
+            // Parse .stasis-ci.yaml
             let runner_config = (*parser).parse(&workspace_path).await?;
 
             // Create job context

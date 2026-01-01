@@ -7,7 +7,7 @@
 # - Keystore file for signing (optional, for release builds)
 #
 # Usage:
-# Place this file as `runner.yaml` in your Flutter project root
+# Place this file as `.stasis-ci.yaml` in your Flutter project root
 
 image:
   name: "ghcr.io/cirruslabs/flutter"

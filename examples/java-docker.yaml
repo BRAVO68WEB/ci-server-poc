@@ -8,7 +8,7 @@
 # - GitHub token with package write permissions (GITHUB_TOKEN)
 #
 # Usage:
-# Place this file as `runner.yaml` in your Spring Boot project root
+# Place this file as `.stasis-ci.yaml` in your Spring Boot project root
 
 image:
   name: "docker"

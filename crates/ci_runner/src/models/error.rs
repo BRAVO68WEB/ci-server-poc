@@ -6,7 +6,7 @@ pub enum ExecutionError {
     #[error("Failed to clone repository: {0}")]
     CloneError(#[from] GitError),
 
-    #[error("Failed to parse runner.yaml: {0}")]
+    #[error("Failed to parse .stasis-ci.yaml: {0}")]
     ParseError(#[from] ParseError),
 
     #[error("Docker operation failed: {0}")]

@@ -6,7 +6,7 @@
 # - Optional: CGO dependencies may require additional build tools
 #
 # Usage:
-# Place this file as `runner.yaml` in your Go project root
+# Place this file as `.stasis-ci.yaml` in your Go project root
 
 image:
   name: "golang"

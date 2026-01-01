@@ -7,7 +7,7 @@
 # - Optional: NPM_REGISTRY for custom registry (defaults to registry.npmjs.org)
 #
 # Usage:
-# Place this file as `runner.yaml` in your Node.js project root
+# Place this file as `.stasis-ci.yaml` in your Node.js project root
 
 image:
   name: "node"

@@ -18,7 +18,7 @@ impl TaskParser {
 
     #[instrument(skip(self), fields(workspace = %workspace.display()))]
     pub async fn parse(&self, workspace: &Path) -> Result<RunnerConfig, ExecutionError> {
-        let config_path = workspace.join("runner.yaml");
+        let config_path = workspace.join(".stasis-ci.yaml");
 
         // Read file with size limit
         let content = self.read_with_limit(&config_path).await?;

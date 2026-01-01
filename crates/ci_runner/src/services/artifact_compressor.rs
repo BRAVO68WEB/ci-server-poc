@@ -20,6 +20,7 @@ pub struct ArtifactCompressor;
 
 impl ArtifactCompressor {
     /// Collect artifacts matching patterns and compress them
+    /// Returns both individual files and compressed archives (tar.gz, zip)
     pub async fn collect_and_compress(
         workspace_path: &Path,
         patterns: &[String],
@@ -43,12 +44,34 @@ impl ArtifactCompressor {
 
         info!(count = collected_files.len(), "Collected {} files for compression", collected_files.len());
 
-        // Create artifacts directory
+        // Add each individual file as an artifact
+        for file_path in &collected_files {
+            if file_path.is_file() {
+                let relative = file_path.strip_prefix(workspace_path)
+                    .map_err(|e| ExecutionError::IoError(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        format!("Path error: {}", e),
+                    )))?;
+                let relative_str = relative.to_string_lossy().replace('\\', "/");
+                
+                let file_name = file_path.file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or(&relative_str)
+                    .to_string();
+                
+                let artifact_info = Self::create_artifact_info(file_path, workspace_path, &file_name).await?;
+                artifacts.push(artifact_info);
+            }
+        }
+
+        info!(individual_files = artifacts.len(), "Added individual file artifacts");
+
+        // Create artifacts directory for compressed archives
         let artifacts_dir = workspace_path.join(".artifacts");
         fs::create_dir_all(&artifacts_dir).await
             .map_err(ExecutionError::IoError)?;
 
-        // Generate base name for artifacts
+        // Generate base name for compressed artifacts
         let base_name = format!("artifacts-{}", job_id);
 
         // Create tar.gz archive
@@ -63,7 +86,12 @@ impl ArtifactCompressor {
         let zip_info = Self::create_artifact_info(&zip_path, workspace_path, &format!("{}.zip", base_name)).await?;
         artifacts.push(zip_info);
 
-        info!(tar_gz = %tar_gz_path.display(), zip = %zip_path.display(), "Created compressed artifacts");
+        info!(
+            tar_gz = %tar_gz_path.display(), 
+            zip = %zip_path.display(), 
+            total_artifacts = artifacts.len(),
+            "Created compressed artifacts and collected individual files"
+        );
         Ok(artifacts)
     }
 
