@@ -206,5 +206,54 @@ impl JobStore {
             jobs.len()
         }
     }
+
+    /// Search jobs with flexible filtering by owner, repo, status, etc.
+    pub async fn search_jobs(&self, query: &crate::stores::adapter::JobSearchQuery) -> Vec<JobState> {
+        let jobs = self.jobs.read().await;
+        let mut results: Vec<JobState> = jobs.values()
+            .filter(|job| {
+                // Filter by status
+                if let Some(status) = query.status {
+                    if job.status != status {
+                        return false;
+                    }
+                }
+                // Filter by repository owner
+                if let Some(ref owner) = query.repository_owner {
+                    if job.event.repository.owner != *owner {
+                        return false;
+                    }
+                }
+                // Filter by repository name
+                if let Some(ref name) = query.repository_name {
+                    if job.event.repository.name != *name {
+                        return false;
+                    }
+                }
+                // Filter by commit SHA
+                if let Some(ref sha) = query.commit_sha {
+                    if job.event.repository.commit_sha != *sha {
+                        return false;
+                    }
+                }
+                // Filter by ref name (branch/tag)
+                if let Some(ref ref_name) = query.ref_name {
+                    if job.event.repository.ref_name != *ref_name {
+                        return false;
+                    }
+                }
+                true
+            })
+            .cloned()
+            .collect();
+
+        // Sort by started_at descending (newest first)
+        results.sort_by(|a, b| b.started_at.cmp(&a.started_at));
+
+        // Apply pagination
+        let offset = query.offset.unwrap_or(0);
+        let limit = query.limit.unwrap_or(50);
+        results.into_iter().skip(offset).take(limit).collect()
+    }
 }
 

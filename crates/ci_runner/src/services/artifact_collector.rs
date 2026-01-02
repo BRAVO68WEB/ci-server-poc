@@ -4,11 +4,9 @@ use crate::models::error::ExecutionError;
 use crate::models::types::ArtifactInfo;
 use std::path::Path;
 use tokio::fs;
-use tokio::io::AsyncReadExt;
+use tokio::process::Command;
 use tracing::info;
 use glob::Pattern;
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
 
 pub struct ArtifactCollector {
     default_patterns: Vec<String>,
@@ -90,24 +88,44 @@ impl ArtifactCollector {
     }
 
     async fn create_artifact_info(&self, path: &Path, relative_path: &str) -> Result<ArtifactInfo, ExecutionError> {
-        let metadata = fs::metadata(path).await
-            .map_err(ExecutionError::IoError)?;
-        let size = metadata.len();
+        let path_str = path.to_string_lossy();
 
-        // Calculate checksum
-        let mut file = fs::File::open(path).await
+        // Get file size using stat
+        let size_output = Command::new("wc")
+            .args(["--bytes", &*path_str])
+            .output()
+            .await
             .map_err(ExecutionError::IoError)?;
-        let mut hasher = DefaultHasher::new();
-        let mut buffer = vec![0u8; 8192];
-        loop {
-            let n = file.read(&mut buffer).await
-                .map_err(ExecutionError::IoError)?;
-            if n == 0 {
-                break;
-            }
-            buffer[..n].hash(&mut hasher);
+
+        // Parse the output from wc --bytes (which is bytes + filename)
+        let stdout_str = String::from_utf8_lossy(&size_output.stdout);
+        let size: u64 = stdout_str
+            .split_whitespace()
+            .next()
+            .unwrap_or("0")
+            .parse()
+            .unwrap_or(0);
+
+        // Calculate SHA-256 checksum using sha256sum
+        let checksum_output = Command::new("sha256sum")
+            .arg(&*path_str)
+            .output()
+            .await
+            .map_err(ExecutionError::IoError)?;
+
+        if !checksum_output.status.success() {
+            return Err(ExecutionError::IoError(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("sha256sum failed: {}", String::from_utf8_lossy(&checksum_output.stderr)),
+            )));
         }
-        let checksum = format!("{:x}", hasher.finish());
+
+        // sha256sum output format: "hash  filename"
+        let checksum = String::from_utf8_lossy(&checksum_output.stdout)
+            .split_whitespace()
+            .next()
+            .unwrap_or("")
+            .to_string();
 
         let name = path.file_name()
             .and_then(|n| n.to_str())

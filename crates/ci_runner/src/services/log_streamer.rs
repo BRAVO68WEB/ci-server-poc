@@ -1,6 +1,7 @@
 use crate::config::LogStreamerConfig;
 use crate::models::error::StreamError;
 use crate::models::types::{LogEntry, LogLevel};
+use crate::stores::adapter::StoreAdapter;
 use chrono::Utc;
 use reqwest::Client;
 use std::collections::HashMap;
@@ -20,6 +21,8 @@ pub struct LogStreamer {
     config: LogStreamerConfig,
     auth_token: String,
     sequence_map: Arc<Mutex<HashMap<Uuid, u64>>>,
+    /// Local job store for persisting logs
+    job_store: Option<Arc<dyn StoreAdapter>>,
 }
 
 struct LogBuffer {
@@ -67,7 +70,14 @@ impl LogStreamer {
             config,
             auth_token,
             sequence_map: Arc::new(Mutex::new(HashMap::new())),
+            job_store: None,
         }
+    }
+
+    /// Set the job store for local log persistence
+    pub fn with_job_store(mut self, store: Arc<dyn StoreAdapter>) -> Self {
+        self.job_store = Some(store);
+        self
     }
 
     pub async fn send(
@@ -108,7 +118,14 @@ impl LogStreamer {
             sequence,
         };
 
-        // Add to buffer
+        // Store log in local job store if available
+        if let Some(ref store) = self.job_store {
+            if let Err(e) = store.add_log(job_id, entry.clone()).await {
+                warn!(job_id = %job_id, error = %e, "Failed to store log locally");
+            }
+        }
+
+        // Add to buffer for external streaming
         {
             let mut buffer = self.buffer.lock().await;
             buffer.push(entry.clone());
@@ -255,6 +272,7 @@ impl Clone for LogStreamer {
             config: self.config.clone(),
             auth_token: self.auth_token.clone(),
             sequence_map: Arc::clone(&self.sequence_map),
+            job_store: self.job_store.clone(),
         }
     }
 }

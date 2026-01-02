@@ -20,6 +20,25 @@ pub struct JobState {
     pub error: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    #[serde(default)]
+    pub artifacts: Vec<crate::models::types::ArtifactInfo>,
+}
+
+// Conversion from Redis JobState to Memory JobState
+impl From<JobState> for crate::stores::memory::JobState {
+    fn from(state: JobState) -> Self {
+        crate::stores::memory::JobState {
+            job_id: state.job_id,
+            run_id: state.run_id,
+            event: state.event,
+            status: state.status.into(),
+            started_at: state.started_at,
+            finished_at: state.finished_at,
+            result: state.result,
+            error: state.error,
+            artifacts: state.artifacts,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -103,6 +122,7 @@ impl RedisStore {
             error: None,
             created_at: now,
             updated_at: now,
+            artifacts: Vec::new(),
         };
 
         let key = self.job_key(event.job_id);
@@ -202,6 +222,31 @@ impl RedisStore {
         state.error = Some(error.clone());
         state.status = JobStateStatus::Failed;
         state.finished_at = Some(Utc::now());
+        state.updated_at = Utc::now();
+
+        let updated_data = serde_json::to_string(&state)
+            .map_err(|e| ExecutionError::ConfigError(format!("Serialization error: {}", e)))?;
+
+        conn.set::<_, _, ()>(&key, &updated_data).await
+            .map_err(|e| ExecutionError::ConfigError(format!("Redis SET error: {}", e)))?;
+
+        Ok(())
+    }
+
+    pub async fn set_job_artifacts(&self, job_id: Uuid, artifacts: Vec<crate::models::types::ArtifactInfo>) -> Result<(), ExecutionError> {
+        let mut conn = self.client
+            .get_multiplexed_async_connection()
+            .await
+            .map_err(|e| ExecutionError::ConfigError(format!("Redis connection error: {}", e)))?;
+
+        let key = self.job_key(job_id);
+        let data: String = conn.get(&key).await
+            .map_err(|e| ExecutionError::ConfigError(format!("Redis GET error: {}", e)))?;
+
+        let mut state: JobState = serde_json::from_str(&data)
+            .map_err(|e| ExecutionError::ConfigError(format!("Deserialization error: {}", e)))?;
+
+        state.artifacts = artifacts;
         state.updated_at = Utc::now();
 
         let updated_data = serde_json::to_string(&state)

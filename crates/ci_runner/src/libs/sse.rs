@@ -108,7 +108,7 @@ pub async fn stream_job_updates(
     let job_id = path.into_inner();
     
     // Verify job exists
-    if data.job_store.get_job(job_id).await.is_none() {
+    if matches!(data.job_store.get_job(job_id).await, Ok(None) | Err(_)) {
         return Ok(HttpResponse::NotFound().json(json!({
             "error": "Job not found",
             "job_id": job_id
@@ -127,7 +127,7 @@ pub async fn stream_job_updates(
         }))));
         
         // Send current job status
-        if let Some(job) = data.job_store.get_job(job_id).await {
+        if let Ok(Some(job)) = data.job_store.get_job(job_id).await {
             yield Ok::<Bytes, actix_web::Error>(Bytes::from(format!("event: status\ndata: {}\n\n", json!({
                 "job_id": job.job_id,
                 "status": format!("{:?}", job.status).to_lowercase(),

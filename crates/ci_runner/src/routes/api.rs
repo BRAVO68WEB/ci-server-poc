@@ -40,7 +40,7 @@ pub async fn scalar_docs() -> ActixResult<impl Responder> {
 
 pub struct AppState {
     pub scheduler: Arc<crate::services::scheduler::JobScheduler>,
-    pub job_store: Arc<crate::stores::memory::JobStore>,
+    pub job_store: Arc<dyn crate::stores::adapter::StoreAdapter>,
     pub artifact_store: Arc<dyn crate::stores::artifact_trait::ArtifactStorage>,
     pub auth_state: Option<Arc<crate::middleware::auth::AuthState>>,
     pub job_handler: Arc<dyn Fn(JobEvent) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<JobResult, crate::models::error::ExecutionError>> + Send>> + Send + Sync>,
@@ -121,10 +121,17 @@ pub async fn replay_job(
     
     // Get original job
     let original_job = match data.job_store.get_job(job_id).await {
-        Some(job) => job,
-        None => {
+        Ok(Some(job)) => job,
+        Ok(None) => {
             return Ok(HttpResponse::NotFound().json(json!({
                 "error": "Job not found",
+                "job_id": job_id
+            })));
+        }
+        Err(e) => {
+            error!(job_id = %job_id, error = %e, "Failed to get job");
+            return Ok(HttpResponse::InternalServerError().json(json!({
+                "error": format!("Failed to get job: {}", e),
                 "job_id": job_id
             })));
         }
@@ -253,10 +260,17 @@ pub async fn retry_job(
     
     // Get original job
     let original_job = match data.job_store.get_job(job_id).await {
-        Some(job) => job,
-        None => {
+        Ok(Some(job)) => job,
+        Ok(None) => {
             return Ok(HttpResponse::NotFound().json(json!({
                 "error": "Job not found",
+                "job_id": job_id
+            })));
+        }
+        Err(e) => {
+            error!(job_id = %job_id, error = %e, "Failed to get job");
+            return Ok(HttpResponse::InternalServerError().json(json!({
+                "error": format!("Failed to get job: {}", e),
                 "job_id": job_id
             })));
         }
@@ -573,7 +587,7 @@ pub async fn get_job_status(
     let job_id = path.into_inner();
 
     match data.job_store.get_job(job_id).await {
-        Some(job) => {
+        Ok(Some(job)) => {
             Ok(HttpResponse::Ok().json(json!({
                 "job_id": job.job_id,
                 "run_id": job.run_id,
@@ -616,10 +630,17 @@ pub async fn get_job_status(
                 })).collect::<Vec<_>>(),
             })))
         }
-        None => Ok(HttpResponse::NotFound().json(json!({
+        Ok(None) => Ok(HttpResponse::NotFound().json(json!({
             "error": "Job not found",
             "job_id": job_id
         }))),
+        Err(e) => {
+            error!(job_id = %job_id, error = %e, "Failed to get job");
+            Ok(HttpResponse::InternalServerError().json(json!({
+                "error": format!("Failed to get job: {}", e),
+                "job_id": job_id
+            })))
+        }
     }
 }
 
@@ -664,8 +685,16 @@ pub async fn list_jobs(
         }
     });
 
-    let jobs = data.job_store.list_jobs(limit, offset, status_filter).await;
-    let total = data.job_store.count_jobs(status_filter).await;
+    let jobs = match data.job_store.list_jobs(limit, offset, status_filter).await {
+        Ok(jobs) => jobs,
+        Err(e) => {
+            error!(error = %e, "Failed to list jobs");
+            return Ok(HttpResponse::InternalServerError().json(json!({
+                "error": format!("Failed to list jobs: {}", e)
+            })));
+        }
+    };
+    let total = data.job_store.count_jobs(status_filter).await.unwrap_or(0);
 
     Ok(HttpResponse::Ok().json(json!({
         "jobs": jobs.iter().map(|job| json!({
@@ -725,11 +754,20 @@ pub async fn get_job_logs(
     let job_id = path.into_inner();
     let limit = query.limit;
 
-    let logs = data.job_store.get_logs(job_id, limit).await;
+    let logs = match data.job_store.get_logs(job_id, limit).await {
+        Ok(logs) => logs,
+        Err(e) => {
+            error!(job_id = %job_id, error = %e, "Failed to get logs");
+            return Ok(HttpResponse::InternalServerError().json(json!({
+                "error": format!("Failed to get logs: {}", e),
+                "job_id": job_id
+            })));
+        }
+    };
 
     if logs.is_empty() {
         // Check if job exists
-        if data.job_store.get_job(job_id).await.is_none() {
+        if matches!(data.job_store.get_job(job_id).await, Ok(None) | Err(_)) {
             return Ok(HttpResponse::NotFound().json(json!({
                 "error": "Job not found",
                 "job_id": job_id
@@ -737,16 +775,25 @@ pub async fn get_job_logs(
         }
     }
 
+    // Sort logs by sequence (or timestamp as fallback)
+    let mut sorted_logs = logs.clone();
+    sorted_logs.sort_by(|a, b| {
+        a.sequence.cmp(&b.sequence)
+            .then_with(|| a.timestamp.cmp(&b.timestamp))
+    });
+
+    let logs_collection: Vec<_> = sorted_logs.iter().map(|log| json!({
+        "timestamp": log.timestamp,
+        "level": format!("{:?}", log.level).to_lowercase(),
+        "step_name": log.step_name,
+        "message": log.message,
+        "sequence": log.sequence,
+    })).collect();
+
     Ok(HttpResponse::Ok().json(json!({
         "job_id": job_id,
-        "logs": logs.iter().map(|log| json!({
-            "timestamp": log.timestamp,
-            "level": format!("{:?}", log.level).to_lowercase(),
-            "step_name": log.step_name,
-            "message": log.message,
-            "sequence": log.sequence,
-        })).collect::<Vec<_>>(),
-        "count": logs.len(),
+        "logs": logs_collection,
+        "count": sorted_logs.len(),
     })))
 }
 
@@ -826,7 +873,7 @@ pub async fn upload_artifact(
     let (job_id, artifact_name) = path.into_inner();
     
     // Verify job exists
-    if data.job_store.get_job(job_id).await.is_none() {
+    if matches!(data.job_store.get_job(job_id).await, Ok(None) | Err(_)) {
         return Ok(HttpResponse::NotFound().json(json!({
             "error": "Job not found",
             "job_id": job_id
@@ -917,7 +964,7 @@ pub async fn list_artifacts(
     let job_id = path.into_inner();
 
     // Verify job exists
-    if data.job_store.get_job(job_id).await.is_none() {
+    if matches!(data.job_store.get_job(job_id).await, Ok(None) | Err(_)) {
         return Ok(HttpResponse::NotFound().json(json!({
             "error": "Job not found",
             "job_id": job_id
@@ -930,5 +977,107 @@ pub async fn list_artifacts(
         "job_id": job_id,
         "artifacts": artifacts,
         "count": artifacts.len(),
+    })))
+}
+
+#[derive(serde::Deserialize)]
+pub struct SearchJobsQuery {
+    pub owner: Option<String>,
+    pub repo: Option<String>,
+    pub status: Option<String>,
+    pub ref_name: Option<String>,
+    pub commit_sha: Option<String>,
+    pub limit: Option<usize>,
+    pub offset: Option<usize>,
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/repos/{owner}/{repo}/jobs",
+    tag = "jobs",
+    params(
+        ("owner" = String, Path, description = "Repository owner"),
+        ("repo" = String, Path, description = "Repository name"),
+        ("status" = Option<String>, Query, description = "Filter by status"),
+        ("ref_name" = Option<String>, Query, description = "Filter by branch/tag name"),
+        ("commit_sha" = Option<String>, Query, description = "Filter by commit SHA"),
+        ("limit" = Option<usize>, Query, description = "Maximum number of jobs to return"),
+        ("offset" = Option<usize>, Query, description = "Number of jobs to skip")
+    ),
+    responses(
+        (status = 200, description = "List of jobs for the repository"),
+        (status = 401, description = "Unauthorized")
+    ),
+    security(
+        ("api_key" = [])
+    )
+)]
+pub async fn search_jobs_by_repo(
+    req: actix_web::HttpRequest,
+    path: web::Path<(String, String)>,
+    data: web::Data<AppState>,
+    query: web::Query<SearchJobsQuery>,
+) -> ActixResult<impl Responder> {
+    // Check auth
+    if let Err(resp) = check_auth(&req, &data.auth_state).await {
+        return Ok(resp);
+    }
+    
+    let (owner, repo) = path.into_inner();
+    
+    let status_filter = query.status.as_ref().and_then(|s| {
+        match s.as_str() {
+            "pending" => Some(JobStateStatus::Pending),
+            "running" => Some(JobStateStatus::Running),
+            "completed" => Some(JobStateStatus::Completed),
+            "failed" => Some(JobStateStatus::Failed),
+            "cancelled" => Some(JobStateStatus::Cancelled),
+            _ => None,
+        }
+    });
+
+    let search_query = crate::stores::adapter::JobSearchQuery {
+        status: status_filter,
+        repository_owner: Some(owner.clone()),
+        repository_name: Some(repo.clone()),
+        commit_sha: query.commit_sha.clone(),
+        ref_name: query.ref_name.clone(),
+        limit: Some(query.limit.unwrap_or(50).min(100)),
+        offset: Some(query.offset.unwrap_or(0)),
+    };
+
+    let jobs = match data.job_store.search_jobs(&search_query).await {
+        Ok(jobs) => jobs,
+        Err(e) => {
+            error!(owner = %owner, repo = %repo, error = %e, "Failed to search jobs");
+            return Ok(HttpResponse::InternalServerError().json(json!({
+                "error": format!("Failed to search jobs: {}", e)
+            })));
+        }
+    };
+
+    Ok(HttpResponse::Ok().json(json!({
+        "repository": {
+            "owner": owner,
+            "name": repo,
+        },
+        "jobs": jobs.iter().map(|job| json!({
+            "job_id": job.job_id,
+            "run_id": job.run_id,
+            "status": format!("{:?}", job.status).to_lowercase(),
+            "started_at": job.started_at,
+            "finished_at": job.finished_at,
+            "commit_sha": job.event.repository.commit_sha,
+            "ref_name": job.event.repository.ref_name,
+            "trigger": {
+                "event_type": format!("{:?}", job.event.trigger.event_type).to_lowercase(),
+                "actor": job.event.trigger.actor,
+            },
+        })).collect::<Vec<_>>(),
+        "pagination": {
+            "limit": search_query.limit,
+            "offset": search_query.offset,
+            "count": jobs.len(),
+        }
     })))
 }

@@ -6,13 +6,12 @@ use crate::models::types::ArtifactInfo;
 use flate2::write::GzEncoder;
 use flate2::Compression;
 use glob::Pattern;
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use tar::Builder;
 use tokio::fs;
 use tokio::io::AsyncReadExt;
+use tokio::process::Command;
 use tracing::{info, warn};
 use zip::write::{SimpleFileOptions, ZipWriter};
 
@@ -181,9 +180,22 @@ impl ArtifactCompressor {
             }
         }
 
-        tar.finish()
+        // Get the GzEncoder back from the tar builder
+        let encoder = tar.into_inner()
             .map_err(|e| ExecutionError::IoError(std::io::Error::other(
-                format!("Tar finish error: {}", e),
+                format!("Tar into_inner error: {}", e),
+            )))?;
+        
+        // Finish the GzEncoder to flush all compressed data
+        let file = encoder.finish()
+            .map_err(|e| ExecutionError::IoError(std::io::Error::other(
+                format!("GzEncoder finish error: {}", e),
+            )))?;
+        
+        // Sync all data to disk to ensure metadata is accurate
+        file.sync_all()
+            .map_err(|e| ExecutionError::IoError(std::io::Error::other(
+                format!("File sync error: {}", e),
             )))?;
 
         Ok(())
@@ -235,9 +247,16 @@ impl ArtifactCompressor {
             }
         }
 
-        zip.finish()
+        // Finish the zip and get the underlying file
+        let file = zip.finish()
             .map_err(|e| ExecutionError::IoError(std::io::Error::other(
                 format!("Zip finish error: {}", e),
+            )))?;
+        
+        // Sync all data to disk to ensure metadata is accurate
+        file.sync_all()
+            .map_err(|e| ExecutionError::IoError(std::io::Error::other(
+                format!("File sync error: {}", e),
             )))?;
 
         Ok(())
@@ -248,24 +267,44 @@ impl ArtifactCompressor {
         _workspace_path: &Path,
         name: &str,
     ) -> Result<ArtifactInfo, ExecutionError> {
-        let metadata = fs::metadata(path).await
-            .map_err(ExecutionError::IoError)?;
-        let size = metadata.len();
+        let path_str = path.to_string_lossy();
 
-        // Calculate checksum
-        let mut file = fs::File::open(path).await
+        // Get file size using stat
+        let size_output = Command::new("wc")
+            .args(["--bytes", &*path_str])
+            .output()
+            .await
             .map_err(ExecutionError::IoError)?;
-        let mut hasher = DefaultHasher::new();
-        let mut buffer = vec![0u8; 8192];
-        loop {
-            let n = file.read(&mut buffer).await
-                .map_err(ExecutionError::IoError)?;
-            if n == 0 {
-                break;
-            }
-            buffer[..n].hash(&mut hasher);
+
+        // Parse the output from wc --bytes (which is bytes + filename)
+        let stdout_str = String::from_utf8_lossy(&size_output.stdout);
+        let size: u64 = stdout_str
+            .split_whitespace()
+            .next()
+            .unwrap_or("0")
+            .parse()
+            .unwrap_or(0);
+
+        // Calculate SHA-256 checksum using sha256sum
+        let checksum_output = Command::new("sha256sum")
+            .arg(&*path_str)
+            .output()
+            .await
+            .map_err(ExecutionError::IoError)?;
+
+        if !checksum_output.status.success() {
+            return Err(ExecutionError::IoError(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("sha256sum failed: {}", String::from_utf8_lossy(&checksum_output.stderr)),
+            )));
         }
-        let checksum = format!("{:x}", hasher.finish());
+
+        // sha256sum output format: "hash  filename"
+        let checksum = String::from_utf8_lossy(&checksum_output.stdout)
+            .split_whitespace()
+            .next()
+            .unwrap_or("")
+            .to_string();
 
         Ok(ArtifactInfo {
             name: name.to_string(),

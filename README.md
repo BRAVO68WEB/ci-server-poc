@@ -1,4 +1,4 @@
-# CI Runner
+# Stasis CI
 
 A distributed CI/CD runner system built with Rust, designed to execute CI jobs in isolated Docker containers.
 

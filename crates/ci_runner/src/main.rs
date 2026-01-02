@@ -52,9 +52,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     ci_runner::utils::metrics::Metrics::init();
     info!("Metrics initialized");
 
-    // Initialize job store
-    let job_store = Arc::new(ci_runner::stores::memory::JobStore::new(config.store.max_history));
-    info!("Job store initialized");
+    // Initialize job store based on config
+    use ci_runner::stores::adapter::{StoreAdapter, InMemoryStoreAdapter, RedisStoreAdapter};
+    let job_store: Arc<dyn StoreAdapter> = if config.store.store_type == "redis" {
+        let redis_url = config.store.redis_url.as_ref()
+            .ok_or_else(|| "Redis store type specified but redis_url is missing")?;
+        let redis_store = ci_runner::stores::redis::RedisStore::new(
+            redis_url,
+            config.store.redis_prefix.clone(),
+            config.store.max_history,
+        ).await.map_err(|e| {
+            error!("Failed to initialize Redis store: {}", e);
+            e
+        })?;
+        info!("Redis job store initialized at {}", redis_url);
+        Arc::new(RedisStoreAdapter::new(Arc::new(redis_store)))
+    } else {
+        let memory_store = ci_runner::stores::memory::JobStore::new(config.store.max_history);
+        info!("In-memory job store initialized");
+        Arc::new(InMemoryStoreAdapter::new(Arc::new(memory_store)))
+    };
 
     // Initialize artifact store (local or S3 based on config)
     use std::sync::Arc as StdArc;
@@ -169,7 +186,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let log_streamer = Arc::new(LogStreamer::new(
                 config.log_streamer.clone(),
                 auth_token.clone(),
-            ));
+            ).with_job_store(Arc::clone(&job_store)));
             log_streamer.clone().start_background_flusher();
 
             let event_publisher = Arc::new(EventPublisher::new(
@@ -342,9 +359,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .route("/api/v1/jobs/{job_id}/retry", web::post().to(routes::api::retry_job))
                 .route("/api/v1/jobs/{job_id}/logs", web::get().to(routes::api::get_job_logs))
                 .route("/api/v1/jobs/{job_id}/stream", web::get().to(ci_runner::libs::sse::stream_job_updates))
+                // Repository-specific job endpoints
+                .route("/api/v1/repos/{owner}/{repo}/jobs", web::get().to(routes::api::search_jobs_by_repo))
                 // Artifact endpoints
                 .route("/api/v1/jobs/{job_id}/artifacts", web::post().to(routes::api::upload_artifact))
                 .route("/api/v1/jobs/{job_id}/artifacts/{artifact_name}", web::get().to(routes::api::download_artifact))
+                .route("/api/v1/jobs/{job_id}/artifacts", web::get().to(routes::api::list_artifacts))
                 .app_data(web::Data::new(event_broadcaster_for_server.clone()))
         })
         .bind(&server_addr)
@@ -353,6 +373,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await
         .expect("Server error");
     });
+
+    // Start dedicated metrics server if enabled
+    let metrics_handle = if config.metrics.enabled {
+        let metrics_addr = format!("{}:{}", config.server.host, config.metrics.port);
+        let metrics_path = config.metrics.path.clone();
+        info!("Starting metrics server on {} at path {}", metrics_addr, metrics_path);
+        
+        Some(tokio::spawn(async move {
+            HttpServer::new(move || {
+                ActixApp::new()
+                    .route(&metrics_path, web::get().to(routes::api::metrics_handler))
+                    .route("/health", web::get().to(routes::api::health_check))
+            })
+            .bind(&metrics_addr)
+            .expect("Failed to bind metrics server")
+            .run()
+            .await
+            .expect("Metrics server error");
+        }))
+    } else {
+        info!("Metrics server disabled");
+        None
+    };
 
     // Start background cleanup task
     let workspace_manager_cleanup = Arc::clone(&app.workspace_manager);
@@ -389,6 +432,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or_else(|_| warn!("Graceful shutdown timeout exceeded"));
 
     server_handle.abort();
+    if let Some(handle) = metrics_handle {
+        handle.abort();
+    }
 
     info!("CI Runner stopped");
     Ok(())
