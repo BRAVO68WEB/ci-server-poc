@@ -309,6 +309,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
+    // Initialize deploy key manager
+    let deploy_key_manager: Option<Arc<ci_runner::services::deploy_key::DeployKeyManager>> = {
+        let redis_url = if config.store.store_type == "redis" {
+            config.store.redis_url.as_deref()
+        } else {
+            None
+        };
+        let key_dir = std::path::PathBuf::from(&config.executor.cache_root).join("deploy_keys");
+        match ci_runner::services::deploy_key::DeployKeyManager::new(redis_url, key_dir).await {
+            Ok(manager) => {
+                info!("Deploy key manager initialized");
+                Some(Arc::new(manager))
+            }
+            Err(e) => {
+                warn!(error = %e, "Failed to initialize deploy key manager, SSH cloning may not work");
+                None
+            }
+        }
+    };
+
     // Start HTTP server
     use actix_web::{App as ActixApp, HttpServer};
     let scheduler_for_server = Arc::clone(&app.scheduler);
@@ -316,6 +336,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let artifact_store_for_server = Arc::clone(&artifact_store);
     let auth_state_for_server = auth_state.clone();
     let event_broadcaster_for_server = Arc::clone(&event_broadcaster);
+    let deploy_key_manager_for_server = deploy_key_manager.clone();
     
     // Wrap job handler in a boxed closure that matches the trait object signature
     let job_handler_wrapper: Arc<dyn Fn(ci_runner::JobEvent) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<ci_runner::models::types::JobResult, ci_runner::models::error::ExecutionError>> + Send>> + Send + Sync> = 
@@ -336,6 +357,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 auth_state: Some(Arc::new(auth_state_for_server.get_ref().clone())),
                 job_handler: Arc::clone(&job_handler_wrapper),
                 event_broadcaster: Some(Arc::clone(&event_broadcaster_for_server)),
+                deploy_key_manager: deploy_key_manager_for_server.clone(),
             };
             
             
@@ -365,6 +387,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .route("/api/v1/jobs/{job_id}/artifacts", web::post().to(routes::api::upload_artifact))
                 .route("/api/v1/jobs/{job_id}/artifacts/{artifact_name}", web::get().to(routes::api::download_artifact))
                 .route("/api/v1/jobs/{job_id}/artifacts", web::get().to(routes::api::list_artifacts))
+                // Deploy key endpoint
+                .route("/api/v1/deploy_key", web::get().to(routes::api::get_deploy_key))
                 .app_data(web::Data::new(event_broadcaster_for_server.clone()))
         })
         .bind(&server_addr)

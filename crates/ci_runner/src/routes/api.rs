@@ -45,6 +45,7 @@ pub struct AppState {
     pub auth_state: Option<Arc<crate::middleware::auth::AuthState>>,
     pub job_handler: Arc<dyn Fn(JobEvent) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<JobResult, crate::models::error::ExecutionError>> + Send>> + Send + Sync>,
     pub event_broadcaster: Option<Arc<crate::libs::sse::JobEventBroadcaster>>,
+    pub deploy_key_manager: Option<Arc<crate::services::deploy_key::DeployKeyManager>>,
 }
 
 // Helper function to check auth
@@ -1080,4 +1081,106 @@ pub async fn search_jobs_by_repo(
             "count": jobs.len(),
         }
     })))
+}
+
+#[derive(Debug, serde::Deserialize, utoipa::IntoParams)]
+pub struct DeployKeyQuery {
+    /// Set to true to regenerate the deploy key
+    #[serde(default)]
+    pub regenerate: bool,
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/deploy_key",
+    tag = "system",
+    params(DeployKeyQuery),
+    responses(
+        (status = 200, description = "SSH Deploy Key", body = Object),
+        (status = 401, description = "Unauthorized"),
+        (status = 500, description = "Deploy key manager not configured")
+    ),
+    security(
+        ("api_key" = [])
+    )
+)]
+pub async fn get_deploy_key(
+    req: actix_web::HttpRequest,
+    data: web::Data<AppState>,
+    query: web::Query<DeployKeyQuery>,
+) -> ActixResult<impl Responder> {
+    // Check auth
+    if let Err(resp) = check_auth(&req, &data.auth_state).await {
+        return Ok(resp);
+    }
+
+    let key_manager = match &data.deploy_key_manager {
+        Some(km) => km,
+        None => {
+            return Ok(HttpResponse::InternalServerError().json(json!({
+                "error": "Deploy key manager not configured"
+            })));
+        }
+    };
+
+    // Regenerate if requested
+    if query.regenerate {
+        match key_manager.regenerate().await {
+            Ok(key) => {
+                info!(fingerprint = %key.fingerprint, "Deploy key regenerated via API");
+                return Ok(HttpResponse::Ok().json(json!({
+                    "public_key": key.public_key,
+                    "fingerprint": key.fingerprint,
+                    "created_at": key.created_at,
+                    "regenerated": true,
+                    "message": "Deploy key regenerated. Please update your Git server with the new public key."
+                })));
+            }
+            Err(e) => {
+                error!(error = %e, "Failed to regenerate deploy key");
+                return Ok(HttpResponse::InternalServerError().json(json!({
+                    "error": format!("Failed to regenerate deploy key: {}", e)
+                })));
+            }
+        }
+    }
+
+    // Get existing key or generate if not exists
+    match key_manager.get_public_key().await {
+        Ok(Some(key)) => {
+            Ok(HttpResponse::Ok().json(json!({
+                "public_key": key.public_key,
+                "fingerprint": key.fingerprint,
+                "created_at": key.created_at,
+                "exists": true
+            })))
+        }
+        Ok(None) => {
+            // No key exists, generate one
+            match key_manager.regenerate().await {
+                Ok(key) => {
+                    info!(fingerprint = %key.fingerprint, "Deploy key generated via API (first time)");
+                    Ok(HttpResponse::Ok().json(json!({
+                        "public_key": key.public_key,
+                        "fingerprint": key.fingerprint,
+                        "created_at": key.created_at,
+                        "generated": true,
+                        "message": "New deploy key generated. Please add this public key to your Git server."
+                    })))
+                }
+                Err(e) => {
+                    error!(error = %e, "Failed to generate deploy key");
+                    Ok(HttpResponse::InternalServerError().json(json!({
+                        "error": format!("Failed to generate deploy key: {}", e)
+                    })))
+                }
+            }
+        }
+        Err(e) => {
+            error!(error = %e, "Failed to get deploy key");
+            Ok(HttpResponse::InternalServerError().json(json!({
+                "error": format!("Failed to get deploy key: {}", e)
+            })))
+        }
+    }
 }

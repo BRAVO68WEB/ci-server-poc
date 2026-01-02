@@ -1,12 +1,14 @@
 use crate::models::error::{ExecutionError, GitError};
 use crate::models::types::RepositoryInfo;
+use crate::services::deploy_key::DeployKeyManager;
 use secrecy::SecretString;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::fs;
 use tokio::time::timeout;
-use tracing::{error, info, instrument};
+use tracing::{error, info, instrument, warn};
 
 #[derive(Debug, Clone)]
 pub struct ServiceAuth {
@@ -27,6 +29,7 @@ pub struct RepositoryCloner {
     git_timeout: Duration,
     clone_depth: Option<u32>,
     lfs_enabled: bool,
+    deploy_key_manager: Option<Arc<DeployKeyManager>>,
 }
 
 impl RepositoryCloner {
@@ -41,7 +44,69 @@ impl RepositoryCloner {
             git_timeout,
             clone_depth,
             lfs_enabled,
+            deploy_key_manager: None,
         }
+    }
+
+    /// Set the deploy key manager for SSH-based cloning
+    pub fn with_deploy_key_manager(mut self, manager: Arc<DeployKeyManager>) -> Self {
+        self.deploy_key_manager = Some(manager);
+        self
+    }
+
+    /// Create SSH auth from the deploy key manager
+    /// Returns None if no deploy key manager is configured or key retrieval fails
+    pub async fn get_ssh_auth(&self) -> Option<ServiceAuth> {
+        let manager = self.deploy_key_manager.as_ref()?;
+        
+        match manager.get_private_key_path().await {
+            Ok(key_path) => {
+                info!(key_path = %key_path.display(), "Using deploy key for SSH authentication");
+                Some(ServiceAuth {
+                    token_type: TokenType::SSH { key_path },
+                    token: SecretString::from(""),
+                    expiry: None,
+                })
+            }
+            Err(e) => {
+                warn!(error = %e, "Failed to get deploy key for SSH auth");
+                None
+            }
+        }
+    }
+
+    /// Clone a repository using the configured deploy key (SSH)
+    /// Falls back to the provided auth if deploy key is not available
+    #[instrument(skip(self), fields(repo = %repo.name))]
+    pub async fn clone_with_deploy_key(
+        &self,
+        job_id: uuid::Uuid,
+        repo: &RepositoryInfo,
+    ) -> Result<PathBuf, ExecutionError> {
+        info!(job_id = %job_id, "Cloning repository: {}", repo.clone_url);
+        info!(job_id = %job_id, "Repository name: {}", repo.name);
+        info!(job_id = %job_id, "Repository clone URL: {}", repo.clone_url);
+        info!(job_id = %job_id, "Repository ref name: {}", repo.ref_name);
+        info!(job_id = %job_id, "Repository commit SHA: {}", repo.commit_sha);
+        info!(job_id = %job_id, "Repository workspace root: {}", self.workspace_root.display());
+        // Try to use deploy key first for SSH URLs
+        if repo.clone_url.starts_with("git@") || repo.clone_url.contains("ssh://") {
+            if let Some(ssh_auth) = self.get_ssh_auth().await {
+                info!(job_id = %job_id, "Using deploy key for SSH clone");
+                return self.clone(job_id, repo, &ssh_auth).await;
+            }
+        }
+
+        // Check if we can convert HTTP URL to SSH and use deploy key
+        if repo.clone_url.starts_with("https://") {
+            if let Some(ssh_auth) = self.get_ssh_auth().await {
+                info!(job_id = %job_id, "Using deploy key for HTTPS clone");
+                return self.clone(job_id, repo, &ssh_auth).await;
+            }
+        }
+
+        
+        Err(ExecutionError::CloneError(GitError::AuthFailed))
     }
 
     #[instrument(skip(self, auth), fields(repo = %repo.name))]
@@ -486,7 +551,7 @@ impl RepositoryCloner {
     fn setup_auth(&self, cmd: &mut Command, auth: &ServiceAuth) -> Result<(), ExecutionError> {
         match &auth.token_type {
             TokenType::Bearer => {
-                cmd.env("GIT_ASKPASS", "echo")
+                cmd
                     .env("GIT_TERMINAL_PROMPT", "0");
                 // Note: In production, use a credential helper
                 // For now, we'll rely on URL-based auth or SSH
@@ -498,7 +563,7 @@ impl RepositoryCloner {
                 );
             }
             TokenType::BasicAuth { username: _ } => {
-                cmd.env("GIT_ASKPASS", "echo")
+                cmd
                     .env("GIT_TERMINAL_PROMPT", "0");
                 // URL format: https://username:token@host/path
             }

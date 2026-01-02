@@ -8,4 +8,5 @@ pub mod executor;
 pub mod log_streamer;
 pub mod parser;
 pub mod scheduler;
+pub mod deploy_key;
 
